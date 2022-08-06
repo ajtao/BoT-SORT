@@ -14,7 +14,7 @@ full_class_ids = {'near': 0,
                   'far': 2,
                   'far-jump': 3,
                   'ball': 4}
-
+class_names = full_class_ids.keys()
 full_id_to_name = {v: k for k, v in full_class_ids.items()}
 
 simple_class_names = ['near', 'far', 'ball']
@@ -42,7 +42,7 @@ class STrack(BaseTrack):
         self.is_activated = False
         self.jump_thr = jump_thr  # threshold for jumping classification
 
-        self.jump_hist = False
+        self.jumping_hist = False
         self.jumping = False
         self.cls = -1
         self.cls_hist = []  # (cls id, freq)
@@ -284,7 +284,9 @@ class STrack(BaseTrack):
 
 class VbSORT(object):
     def __init__(self, args, frame_rate=30):
-
+        global class_names
+        self.class_names = class_names
+        self.num_classes = len(class_names)
         self.tracked_stracks = []  # type: list[STrack]
         self.lost_stracks = []  # type: list[STrack]
         self.removed_stracks = []  # type: list[STrack]
@@ -306,7 +308,8 @@ class VbSORT(object):
         self.appearance_thresh = args.appearance_thresh
 
         if args.with_reid:
-            self.encoder = FastReIDInterface(args.fast_reid_config, args.fast_reid_weights, args.device)
+            self.encoder = FastReIDInterface(args.fast_reid_config, args.fast_reid_weights,
+                                             args.device)
 
         self.gmc = GMC(method=args.cmc_method, verbose=[args.name, args.ablation])
 
@@ -323,22 +326,29 @@ class VbSORT(object):
         if len(output_results):
             bboxes = output_results[:, :4]
             scores = output_results[:, 4]
-            classes = output_results[:, 5]
-            features = output_results[:, 6:]
+            if output_results.shape[1] == 6:
+                classes = output_results[:, 5]
+            elif output_results.shape[1] == 7:
+                scores2 = output_results[:, 5]
+                scores *= scores2
+                classes = output_results[:, 6]
+            else:
+                raise
+            # features = output_results[:, 6:]
 
             # Remove bad detections
             lowest_inds = scores > self.track_low_thresh
             bboxes = bboxes[lowest_inds]
             scores = scores[lowest_inds]
             classes = classes[lowest_inds]
-            features = output_results[lowest_inds]
+            # features = None  # output_results[lowest_inds]
 
             # Find high threshold detections
             remain_inds = scores > self.args.track_high_thresh
             dets = bboxes[remain_inds]
             scores_keep = scores[remain_inds]
             classes_keep = classes[remain_inds]
-            features_keep = features[remain_inds]
+            # features_keep = features[remain_inds]
         else:
             bboxes = []
             scores = []
@@ -348,6 +358,7 @@ class VbSORT(object):
             classes_keep = []
 
         '''Extract embeddings '''
+        assert self.args.with_reid, f'VbSORT requires reid for now'
         if self.args.with_reid:
             features_keep = self.encoder.inference(img, dets)
 
@@ -500,7 +511,6 @@ class VbSORT(object):
 
         # output_stracks = [track for track in self.tracked_stracks if track.is_activated]
         output_stracks = [track for track in self.tracked_stracks]
-
 
         return output_stracks
 

@@ -9,14 +9,12 @@ import cv2
 import torch
 from loguru import logger
 
-sys.path.append('.')
-
 from yolox.data.data_augment import preproc
 from yolox.exp import get_exp
 from yolox.utils import fuse_model, get_model_info, postprocess, setup_logger
 from yolox.utils.visualize import plot_tracking_mc
 
-from tracker.vb_sort import VbSORT
+from tracker.vball_sort import VbSORT
 from tracker.tracking_utils.timer import Timer
 
 from vtrak.match_config import Match
@@ -30,7 +28,6 @@ IMAGE_EXT = [".jpg", ".jpeg", ".webp", ".bmp", ".png"]
 
 def make_parser():
     parser = argparse.ArgumentParser("BoT-SORT Demo!")
-    parser.add_argument("demo", default="image", help="demo type, eg. image, video and webcam")
     parser.add_argument("-expn", "--experiment-name", type=str, default=None)
     parser.add_argument("-n", "--name", type=str, default=None, help="model name")
     parser.add_argument("--path", default="", help="path to images or video")
@@ -57,14 +54,40 @@ def make_parser():
     parser.add_argument("--fuse-score", dest="fuse_score", default=False, action="store_true", help="fuse score and iou for association")
 
     # CMC
-    parser.add_argument("--cmc-method", default="orb", type=str, help="cmc method: files (Vidstab GMC) | orb | ecc")
-
+    parser.add_argument("--cmc-method", default="none", type=str,
+                        help=("cmc method: files (Vidstab GMC) | orb | ecc"
+                              "But we shouldn't need CMC with vb, so defaulting to off"))
     # ReID
-    parser.add_argument("--with-reid", dest="with_reid", default=False, action="store_true", help="use reid model")
+    parser.add_argument("--with-reid", dest="with_reid", default=True, action="store_true", help="use reid model")
     parser.add_argument("--fast-reid-config", dest="fast_reid_config", default=r"fast_reid/configs/MOT17/sbs_S50.yml", type=str, help="reid config file path")
     parser.add_argument("--fast-reid-weights", dest="fast_reid_weights", default=r"pretrained/mot17_sbs_S50.pth", type=str,help="reid config file path")
     parser.add_argument('--proximity_thresh', type=float, default=0.5, help='threshold for rejecting low overlap reid matches')
     parser.add_argument('--appearance_thresh', type=float, default=0.25, help='threshold for rejecting low appearance similarity reid matches')
+
+    parser.add_argument(
+        "--unsquashed", action='store_true'
+    )
+    parser.add_argument(
+        "--play-vid", default=None, help="name of a single video to evaluate"
+    )
+    parser.add_argument(
+        "--match-name", default=None, help="match name"
+    )
+    parser.add_argument(
+        "--view", default=None, help="view"
+    )
+    parser.add_argument(
+        "--tag", default=None, help="tag outputdir"
+    )
+    parser.add_argument(
+        "--max-plays", default=None, type=int, help="max plays"
+    )
+    parser.add_argument(
+        "--start-pad", type=int, default=1,
+    )
+    parser.add_argument(
+        "--end-pad", type=int, default=1,
+    )
     return parser
 
 
@@ -150,98 +173,8 @@ class Predictor(object):
         return outputs, img_info
 
 
-def image_demo(predictor, vis_folder, current_time, args):
-    if osp.isdir(args.path):
-        files = get_image_list(args.path)
-    else:
-        files = [args.path]
-    files.sort()
-
-    tracker = VbSORT(args, frame_rate=args.fps)
-
-    timer = Timer()
-    results = []
-
-    for frame_id, img_path in enumerate(files, 1):
-
-        # Detect objects
-        outputs, img_info = predictor.inference(img_path, timer)
-        scale = min(exp.test_size[0] / float(img_info['height'], ), exp.test_size[1] / float(img_info['width']))
-
-        detections = []
-        if outputs[0] is not None:
-            outputs = outputs[0].cpu().numpy()
-            detections = outputs[:, :7]
-            detections[:, :4] /= scale
-
-        # Run tracker
-        online_targets = tracker.update(detections, img_info['raw_img'])
-
-        online_tlwhs = []
-        online_ids = []
-        online_scores = []
-        online_cls = []
-        for t in online_targets:
-            tlwh = t.tlwh
-            tid = t.track_id
-            if tlwh[2] * tlwh[3] > args.min_box_area:
-                online_tlwhs.append(tlwh)
-                online_ids.append(tid)
-                online_scores.append(t.score)
-                online_cls.append(t.cls)
-
-                # save results
-                results.append(
-                    f"{frame_id},{tid},{tlwh[0]:.2f},{tlwh[1]:.2f},{tlwh[2]:.2f},{tlwh[3]:.2f},{t.score:.2f},-1,-1,-1\n"
-                )
-        timer.toc()
-        online_im = plot_tracking(
-            img_info['raw_img'], online_tlwhs, online_ids, frame_id=frame_id, fps=1. / timer.average_time, ids2=online_cls
-        )
-        # else:
-        #     timer.toc()
-        #     online_im = img_info['raw_img']
-
-        # result_image = predictor.visual(outputs[0], img_info, predictor.confthre)
-        if args.save_result:
-            timestamp = time.strftime("%Y_%m_%d_%H_%M_%S", current_time)
-            save_folder = osp.join(vis_folder, timestamp)
-            os.makedirs(save_folder, exist_ok=True)
-            cv2.imwrite(osp.join(save_folder, osp.basename(img_path)), online_im)
-
-        if frame_id % 20 == 0:
-            logger.info('Processing frame {} ({:.2f} fps)'.format(frame_id, 1. / max(1e-5, timer.average_time)))
-
-        ch = cv2.waitKey(0)
-        if ch == 27 or ch == ord("q") or ch == ord("Q"):
-            break
-
-    if args.save_result:
-        res_file = osp.join(vis_folder, f"{timestamp}.txt")
-        with open(res_file, 'w') as f:
-            f.writelines(results)
-        logger.info(f"save results to {res_file}")
-
-
 def imageflow_demo(dataloader, predictor, current_time, args, result_filename, vid_writer,
                    court):
-    """
-    cap = cv2.VideoCapture(args.path if args.demo == "video" else args.camid)
-    width = cap.get(cv2.CAP_PROP_FRAME_WIDTH)  # float
-    height = cap.get(cv2.CAP_PROP_FRAME_HEIGHT)  # float
-    fps = cap.get(cv2.CAP_PROP_FPS)
-    timestamp = time.strftime("%Y_%m_%d_%H_%M_%S", current_time)
-    save_folder = osp.join(vis_folder, timestamp)
-    os.makedirs(save_folder, exist_ok=True)
-    if args.demo == "video":
-        save_path = osp.join(save_folder, args.path.split("/")[-1])
-    else:
-        save_path = osp.join(save_folder, "camera.mp4")
-    logger.info(f"video save_path is {save_path}")
-    vid_writer = cv2.VideoWriter(
-        save_path, cv2.VideoWriter_fourcc(*"mp4v"), fps, (int(width), int(height))
-    )
-    """
     tracker = VbSORT(args, frame_rate=args.fps)
 
     # ----- class name to class id and class id to class name
@@ -291,8 +224,8 @@ def imageflow_demo(dataloader, predictor, current_time, args, result_filename, v
             for trk in online_targets:
                 tlwh = trk.tlwh
                 tid = trk.track_id
-                tlwh = trk.tlwh()
-                dxdy = trk.dxdy()
+                tlwh = trk.tlwh
+                dxdy = trk.dxdy
                 tlen = trk.tracklet_len
                 cls_id = trk.cls
                 is_jumping = trk.jumping
@@ -325,18 +258,11 @@ def imageflow_demo(dataloader, predictor, current_time, args, result_filename, v
             timer.toc()
             online_im = img_info['raw_img']
 
-        if args.save_result:
-            vid_writer.write(online_im)
-        ch = cv2.waitKey(1)
-        if ch == 27 or ch == ord("q") or ch == ord("Q"):
-            break
-        frame_id += 1
+        vid_writer.write(online_im)
 
-    if args.save_result:
-        res_file = osp.join(vis_folder, f"{timestamp}.txt")
-        with open(res_file, 'w') as f:
-            f.writelines(results)
-        logger.info(f"save results to {res_file}")
+    with open(result_filename, 'w') as f:
+        f.writelines(results)
+    logger.info(f"Saved tracking results to {result_filename}")
 
 
 def setup_volleyvision(args):
@@ -344,14 +270,12 @@ def setup_volleyvision(args):
         cfg.match_root = '/mnt/g/data/vball/matches'
 
     if args.tag is not None:
-        result_root = osp.join(cfg.output_root, 'MC-ByteTrack', args.tag, exp.exp_name, args.match_name)
+        result_root = osp.join(cfg.output_root, 'BotSort', args.tag, exp.exp_name, args.match_name)
     else:
-        result_root = osp.join(cfg.output_root, 'MC-ByteTrack', exp.exp_name, args.match_name)
+        result_root = osp.join(cfg.output_root, 'BotSort', exp.exp_name, args.match_name)
     os.makedirs(result_root, exist_ok=True)
 
-    setup_logger(result_root,
-                 filename="vb_sort.log",
-                 mode="a", )
+    setup_logger(result_root, filename="log.log", mode="a", )
 
     if args.play_vid:
         vid_basename = osp.splitext(osp.basename(args.play_vid))[0]
@@ -455,13 +379,8 @@ def main(exp, args):
 
     predictor = Predictor(model, exp, trt_file, decoder, args.device, args.fp16)
     current_time = time.localtime()
-    if args.demo == "image" or args.demo == "images":
-        image_demo(predictor, result_root, current_time, args)
-    elif args.demo == "video" or args.demo == "webcam":
-        imageflow_demo(dataloader, predictor, current_time, args, result_filename,
-                       vid_writer, court)
-    else:
-        raise ValueError("Error: Unknown source: " + args.demo)
+    imageflow_demo(dataloader, predictor, current_time, args, result_filename,
+                   vid_writer, court)
 
 
 if __name__ == "__main__":

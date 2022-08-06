@@ -49,6 +49,89 @@ def get_color(idx):
     return color
 
 
+def plot_tracking_mc(
+        image,
+        tlwhs,
+        obj_ids,
+        jumping,
+        classes,
+        num_classes,
+        scores=None,
+        frame_id=0,
+        fps=0.0,
+        id2cls=None,
+        play_num=0):
+    """
+    :param image:
+    :param tlwhs_dict:
+    :param obj_ids_dict:
+    :param num_classes:
+    :param scores:
+    :param frame_id:
+    :param fps:
+    :param id2cls:
+    :return:
+    """
+    img = np.ascontiguousarray(np.copy(image))
+    im_h, im_w = img.shape[:2]
+    text_scale = max(1.0, image.shape[1] / 1000.0)  # 1600.
+    text_thickness = 2
+    line_thickness = max(1, int(image.shape[1] / 500.0))
+
+    # ----- draw fps
+    cv2.putText(img,
+                'play: %d frame: %d fps: %.2f' % (play_num, frame_id, fps),
+                (0, int(15 * text_scale)),
+                cv2.FONT_HERSHEY_PLAIN,
+                2,
+                (0, 255, 255),
+                thickness=2)
+
+    for idx, tlwh_i in enumerate(tlwhs):
+        is_jumping = jumping[idx]
+        obj_id = int(obj_ids[idx])
+        cls_id = classes[idx]
+        x1, y1, w, h = tlwh_i
+        int_box = tuple(map(int, (x1, y1, x1 + w, y1 + h)))  # x1, y1, x2, y2
+        if is_jumping:
+            player_txt_color = (0, 0, 255)
+        else:
+            player_txt_color = (0, 255, 255)
+        tr_id_text = '{}'.format(int(obj_id))
+        color = get_color(abs(obj_id))
+
+        # draw bbox
+        cv2.rectangle(img=img,
+                      pt1=int_box[0:2],  # (x1, y1)
+                      pt2=int_box[2:4],  # (x2, y2)
+                      color=color,
+                      thickness=line_thickness)
+
+        # draw class name
+        cv2.putText(img,
+                    id2cls[cls_id],
+                    (int(x1), int(y1)),
+                    cv2.FONT_HERSHEY_PLAIN,
+                    text_scale,
+                    player_txt_color,
+                    thickness=text_thickness)
+
+        txt_w, txt_h = cv2.getTextSize(id2cls[cls_id],
+                                       fontFace=cv2.FONT_HERSHEY_PLAIN,
+                                       fontScale=text_scale, thickness=text_thickness)
+
+        # draw track id
+        cv2.putText(img,
+                    tr_id_text,
+                    (int(x1), int(y1) - txt_h),
+                    cv2.FONT_HERSHEY_PLAIN,
+                    text_scale * 1.2,
+                    player_txt_color,
+                    thickness=text_thickness)
+
+    return img
+
+
 def plot_tracking(image, tlwhs, obj_ids, scores=None, frame_id=0, fps=0., ids2=None):
     im = np.ascontiguousarray(np.copy(image))
     im_h, im_w = im.shape[:2]

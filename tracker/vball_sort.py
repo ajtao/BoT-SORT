@@ -32,21 +32,20 @@ full_to_simple_cls_id = {
 class STrack(BaseTrack):
     shared_kalman = KalmanFilter()
 
-    def __init__(self, tlwh, score, cls, feat=None, feat_history=50,
-                 jump_thr=0.3):
+    def __init__(self, tlwh, score, cls, jumping, feat=None, feat_history=50):
 
         # wait activate
         self._tlwh = np.asarray(tlwh, dtype=np.float)
         self.kalman_filter = None
         self.mean, self.covariance = None, None
         self.is_activated = False
-        self.jump_thr = jump_thr  # threshold for jumping classification
 
-        self.jumping_hist = False
         self.jumping = False
+        self.prev_jumping = False
         self.cls = -1
         self.cls_hist = []  # (cls id, freq)
         self.update_cls(cls, score)
+        self.update_jumping(jumping)
 
         self.score = score
         self.tracklet_len = 0
@@ -68,28 +67,24 @@ class STrack(BaseTrack):
         self.features.append(feat)
         self.smooth_feat /= np.linalg.norm(self.smooth_feat)
 
-    def update_cls(self, cls, score):
+    def update_jumping(self, jumping, hysteresis=True):
         """
-        Maintain queue of cls and queue of jumping
+        We implement a little hysteresis:
+          Need to back-to-back to turn on, 2 to turn off.
+          We'd rather use look-ahead to compute this so it wasn't delayed.
 
-        Updates:
-          self.cls - Should be set according to _update_cls()
-          self.jumping - Employ a little hysterisis.
-             Would love to have lookahead here :(
-             Set to true if 1 positive
-             Set to negative if negative now and last negative
+        :param jumping:
+        :return:
         """
-        simple_cls = full_to_simple_cls_id[cls]
-        self._update_cls(simple_cls, score)
-
-        cls_jumping = 'jump' in full_id_to_name[cls] and score > self.jump_thr
-        if cls_jumping:
+        if not hysteresis:
+            self.jumping = jumping
+        elif jumping and self.prev_jumping:
             self.jumping = True
-        elif not cls_jumping and not self.jumping_hist:
+        elif not jumping and not self.prev_jumping:
             self.jumping = False
-        self.jumping_hist = cls_jumping
+        self.prev_jumping = jumping
 
-    def _update_cls(self, cls, score):
+    def update_cls(self, cls, score):
         """
         Maintain total_scores[cls] table
 
@@ -181,6 +176,7 @@ class STrack(BaseTrack):
         self.score = new_track.score
 
         self.update_cls(new_track.cls, new_track.score)
+        self.update_jumping(new_track.jumping)
 
     def update(self, new_track, frame_id):
         """
@@ -205,6 +201,7 @@ class STrack(BaseTrack):
 
         self.score = new_track.score
         self.update_cls(new_track.cls, new_track.score)
+        self.update_jumping(new_track.jumping)
 
     @property
     # @jit(nopython=True)
@@ -334,6 +331,14 @@ class VbSORT(object):
                 classes = output_results[:, 6]
             else:
                 raise
+
+            jumping = np.copy(classes)
+            for idx in range(output_results.shape[0]):
+                full_cls = classes[idx]
+                simple_cls = full_to_simple_cls_id[full_cls]
+                classes[idx] = simple_cls
+                jumping[idx] = 'jump' in full_id_to_name[full_cls]
+
             # features = output_results[:, 6:]
 
             # Remove bad detections
@@ -341,6 +346,7 @@ class VbSORT(object):
             bboxes = bboxes[lowest_inds]
             scores = scores[lowest_inds]
             classes = classes[lowest_inds]
+            jumping = jumping[lowest_inds]
             # features = None  # output_results[lowest_inds]
 
             # Find high threshold detections
@@ -348,14 +354,17 @@ class VbSORT(object):
             dets = bboxes[remain_inds]
             scores_keep = scores[remain_inds]
             classes_keep = classes[remain_inds]
+            jumping_keep = jumping[remain_inds]
             # features_keep = features[remain_inds]
         else:
             bboxes = []
             scores = []
             classes = []
+            jumping = []
             dets = []
             scores_keep = []
             classes_keep = []
+            jumping_keep = []
 
         '''Extract embeddings '''
         assert self.args.with_reid, f'VbSORT requires reid for now'
@@ -365,11 +374,13 @@ class VbSORT(object):
         if len(dets) > 0:
             '''Detections'''
             if self.args.with_reid:
-                detections = [STrack(STrack.tlbr_to_tlwh(tlbr), s, c, f) for
-                              (tlbr, s, c, f) in zip(dets, scores_keep, classes_keep, features_keep)]
+                detections = [STrack(STrack.tlbr_to_tlwh(tlbr), s, c, j, f) for
+                              (tlbr, s, c, j, f) in zip(dets, scores_keep, classes_keep,
+                                                        jumping_keep, features_keep)]
             else:
-                detections = [STrack(STrack.tlbr_to_tlwh(tlbr), s, c) for
-                              (tlbr, s, c) in zip(dets, scores_keep, classes_keep)]
+                detections = [STrack(STrack.tlbr_to_tlwh(tlbr), s, c, j) for
+                              (tlbr, s, c, j) in zip(dets, scores_keep, classes_keep,
+                                                     jumping_keep)]
         else:
             detections = []
 
@@ -438,16 +449,19 @@ class VbSORT(object):
             dets_second = bboxes[inds_second]
             scores_second = scores[inds_second]
             classes_second = classes[inds_second]
+            jumping_second = jumping[inds_second]
         else:
             dets_second = []
             scores_second = []
             classes_second = []
+            jumping_second = []
 
         # association the untrack to the low score detections
         if len(dets_second) > 0:
             '''Detections'''
-            detections_second = [STrack(STrack.tlbr_to_tlwh(tlbr), s, c) for
-                                 (tlbr, s, c) in zip(dets_second, scores_second, classes_second)]
+            detections_second = [STrack(STrack.tlbr_to_tlwh(tlbr), s, c, j) for
+                                 (tlbr, s, c, j) in zip(dets_second, scores_second, classes_second,
+                                                        jumping_second)]
         else:
             detections_second = []
 

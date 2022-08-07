@@ -14,7 +14,7 @@ from yolox.exp import get_exp
 from yolox.utils import fuse_model, get_model_info, postprocess, setup_logger
 from yolox.utils.visualize import plot_tracking_mc
 
-from tracker.vball_sort import VbSORT
+from tracker.vball_sort import VbSORT, full_id_to_name
 from tracker.tracking_utils.timer import Timer
 
 from vtrak.match_config import Match
@@ -212,6 +212,7 @@ def imageflow_demo(dataloader, predictor, current_time, args, result_filename, v
             outputs = outputs[0].cpu().numpy()
             detections = outputs[:, :7]
             detections[:, :4] /= scale
+            classes = outputs[:, 6]
 
             # Run tracker
             online_targets = tracker.update(detections, img_info["raw_img"])
@@ -220,26 +221,31 @@ def imageflow_demo(dataloader, predictor, current_time, args, result_filename, v
             online_ids = []
             online_scores = []
             online_jumping = []
-            online_classes = []
+            online_nearfar = []
             for trk in online_targets:
                 tlwh = trk.tlwh
                 tid = trk.track_id
                 tlwh = trk.tlwh
                 dxdy = trk.dxdy
                 tlen = trk.tracklet_len
-                cls_id = trk.cls
+                nearfar = trk.cls
                 is_jumping = trk.jumping
                 if tlwh[2] * tlwh[3] > args.min_box_area:
                     online_tlwhs.append(tlwh)
                     online_ids.append(tid)
                     online_scores.append(trk.score)
                     online_jumping.append(is_jumping)
-                    online_classes.append(cls_id)
+                    online_nearfar.append(nearfar)
                     csv_str = (f'{vid_fnum},{tid},{tlwh[0]:.2f},{tlwh[1]:.2f},{tlwh[2]:.2f},'
                                f'{tlwh[3]:.2f},{play_num},{cls_id},{is_jumping},{vid_fnum},'
                                f'{dxdy[0]},{dxdy[1]},{tlen}\n')
                     results.append(csv_str)
 
+            """
+            for idx, id in enumerate(online_ids):
+                cls_str = full_id_to_name[classes[idx]]
+                print(f'id {id} cls {cls_str}')
+            """
             timer.toc()
 
             online_im = plot_tracking_mc(
@@ -247,11 +253,10 @@ def imageflow_demo(dataloader, predictor, current_time, args, result_filename, v
                 tlwhs=online_tlwhs,
                 obj_ids=online_ids,
                 jumping=online_jumping,
-                classes=online_classes,
+                nearfar=online_nearfar,
                 num_classes=tracker.num_classes,
                 frame_id=vid_fnum,
                 fps=1. / timer.average_time,
-                id2cls=id2cls,
                 play_num=play_num,
             )
         else:

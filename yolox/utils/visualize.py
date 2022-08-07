@@ -54,12 +54,11 @@ def plot_tracking_mc(
         tlwhs,
         obj_ids,
         jumping,
-        classes,
+        nearfar,
         num_classes,
         scores=None,
         frame_id=0,
         fps=0.0,
-        id2cls=None,
         play_num=0):
     """
     :param image:
@@ -72,6 +71,10 @@ def plot_tracking_mc(
     :param id2cls:
     :return:
     """
+    nearfar_dict = {
+        0: 'near',
+        1: 'far',
+    }
     img = np.ascontiguousarray(np.copy(image))
     im_h, im_w = img.shape[:2]
     text_scale = max(1.0, image.shape[1] / 1000.0)  # 1600.
@@ -90,11 +93,12 @@ def plot_tracking_mc(
     for idx, tlwh_i in enumerate(tlwhs):
         is_jumping = jumping[idx]
         obj_id = int(obj_ids[idx])
-        cls_id = classes[idx]
+        cls_str = nearfar_dict[nearfar[idx]]
         x1, y1, w, h = tlwh_i
         int_box = tuple(map(int, (x1, y1, x1 + w, y1 + h)))  # x1, y1, x2, y2
         if is_jumping:
             player_txt_color = (0, 0, 255)
+            cls_str += '-jump'
         else:
             player_txt_color = (0, 255, 255)
         tr_id_text = '{}'.format(int(obj_id))
@@ -109,14 +113,14 @@ def plot_tracking_mc(
 
         # draw class name
         cv2.putText(img,
-                    id2cls[cls_id],
+                    cls_str,
                     (int(x1), int(y1)),
                     cv2.FONT_HERSHEY_PLAIN,
                     text_scale,
                     player_txt_color,
                     thickness=text_thickness)
 
-        txt_w, txt_h = cv2.getTextSize(id2cls[cls_id],
+        txt_w, txt_h = cv2.getTextSize(cls_str,
                                        fontFace=cv2.FONT_HERSHEY_PLAIN,
                                        fontScale=text_scale, thickness=text_thickness)
 

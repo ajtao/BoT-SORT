@@ -90,7 +90,7 @@ else
     AH_OPTS="--jumping-posadj --assign-canonical --id-players --canonical-id-frame-offset 0 --backproject --smooth-bev"
 fi
 
-MODELS=( yolox_x_fullcourt_v8_2)
+MODELS=( yolox_x_fullcourt_v7_2)
 EXP=yolox_x_fullcourt
 CFG="-f ../ByteTrack/exps/example/mot/${EXP}.py"
 

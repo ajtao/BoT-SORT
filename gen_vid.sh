@@ -20,8 +20,8 @@ export PYTHONPATH=$PWD:${PWD}/../vball_tracking:../player_id:../vball-mmdet
 export CUDA_VISIBLE_DEVICES=0
 
 GPU=0
-TAG="dbg"
-MAXPLAYS=2
+TAG="BotSORT_8_2"
+MAXPLAYS=5
 
 while getopts 'jg:m:t:p:hv' opt; do
     case "$opt" in
@@ -91,8 +91,11 @@ else
 fi
 
 MODELS=( yolox_x_fullcourt_v7_2)
+MODELS=( yolox_x_fullcourt_v8_2)
 EXP=yolox_x_fullcourt
 CFG="-f ../ByteTrack/exps/example/mot/${EXP}.py"
+
+BOT_HPARAMS="--nms 0.65 --track_high_thresh 0.5 --new_track_thresh 0.6"
 
 for MODEL in "${MODELS[@]}"
 do
@@ -104,7 +107,7 @@ do
 	# Run Tracker ...
 	CKPT="/mnt/g/output/ByteTrack/YOLOX_outputs/${MODEL}/latest_ckpt.pth.tar"
 	CMD="python tools/vb_demo.py  --fp16 --fuse --match-name $MATCH --view end0 --ckpt $CKPT  $CFG \
-    	     --tag $TAG --max-plays $MAXPLAYS --start-pad 2 --end-pad 1 $XYWH"
+    	     --tag $TAG --max-plays $MAXPLAYS --start-pad 2 --end-pad 1 $XYWH $BOT_HPARAMS"
 	echo $CMD
 	$CMD
 	echo $CMD > /mnt/g/output/BotSort/${TAG}/${EXP}/${MATCH}/cmd.sh
@@ -119,7 +122,7 @@ do
 	TRK_CSV="/mnt/g/output/BotSort/${TAG}/${EXP}/${MATCH}/end0.csv"
 	CMD="python ../vball_tracking/apply_heuristics.py --match-name $MATCH --tracking-csv $TRK_CSV --view end0 --tag $TAG $AH_OPTS $VIZVID"
 	echo $CMD
-	# $CMD
+	$CMD
 
     done
 done

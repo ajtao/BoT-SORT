@@ -8,6 +8,7 @@ from collections import defaultdict
 import cv2
 import torch
 from loguru import logger
+import numpy as np
 
 from yolox.data.data_augment import preproc
 from yolox.exp import get_exp
@@ -37,7 +38,7 @@ def make_parser():
     parser.add_argument("-c", "--ckpt", default=None, type=str, help="ckpt for eval")
     parser.add_argument("--device", default="gpu", type=str, help="device to run our model, can either be cpu or gpu")
     parser.add_argument("--conf", default=None, type=float, help="test conf")
-    parser.add_argument("--nms", default=None, type=float, help="test nms threshold")
+    parser.add_argument("--nms", default=0.65, type=float, help="test nms threshold")
     parser.add_argument("--tsize", default=None, type=int, help="test img size")
     parser.add_argument("--fps", default=30, type=int, help="frame rate (fps)")
     parser.add_argument("--fp16", dest="fp16", default=False, action="store_true",help="Adopting mix precision evaluating.")
@@ -45,9 +46,9 @@ def make_parser():
     parser.add_argument("--trt", dest="trt", default=False, action="store_true", help="Using TensorRT model for testing.")
 
     # tracking args
-    parser.add_argument("--track_high_thresh", type=float, default=0.6, help="tracking confidence threshold")
+    parser.add_argument("--track_high_thresh", type=float, default=0.5, help="tracking confidence threshold")
     parser.add_argument("--track_low_thresh", default=0.1, type=float, help="lowest detection threshold")
-    parser.add_argument("--new_track_thresh", default=0.7, type=float, help="new track thresh")
+    parser.add_argument("--new_track_thresh", default=0.6, type=float, help="new track thresh")
     parser.add_argument("--track_buffer", type=int, default=30, help="the frames for keep lost tracks")
     parser.add_argument("--match_thresh", type=float, default=0.8, help="matching threshold for tracking")
     parser.add_argument('--min_box_area', type=float, default=10, help='filter out tiny boxes')
@@ -130,6 +131,7 @@ class Predictor(object):
         self.num_classes = exp.num_classes
         self.confthre = exp.test_conf
         self.nmsthre = exp.nmsthre
+        print(f'BotSORT postproc conf_thresh {self.confthre}, nms thresh {self.nmsthre}')
         self.test_size = exp.test_size
         self.device = device
         self.fp16 = fp16
@@ -145,7 +147,7 @@ class Predictor(object):
         self.rgb_means = (0.485, 0.456, 0.406)
         self.std = (0.229, 0.224, 0.225)
 
-    def inference(self, img, timer):
+    def inference(self, img, timer, dump_input=False):
         img_info = {"id": 0}
         if isinstance(img, str):
             img_info["file_name"] = osp.basename(img)
@@ -166,9 +168,14 @@ class Predictor(object):
 
         with torch.no_grad():
             timer.tic()
+            if dump_input:
+                np.save(f'inp_{dump_input}.npy', img.cpu())
             outputs = self.model(img)
             if self.decoder is not None:
                 outputs = self.decoder(outputs, dtype=outputs.type())
+            if dump_input:
+                np.save(f'oup_{dump_input}.npy', outputs.cpu())
+                import pdb; pdb.set_trace()
             outputs = postprocess(outputs, self.num_classes, self.confthre, self.nmsthre)
         return outputs, img_info
 
@@ -187,7 +194,8 @@ def imageflow_demo(dataloader, predictor, current_time, args, result_filename, v
     timer = Timer()
 
     frame_id = 0
-    results = ['frame,id,x1,y1,w,h,play,class,is_jumping,ori_fnum,dx,dy\n']
+    results = ['frame,id,x1,y1,w,h,play,class,is_jumping,ori_fnum,dx,dy,tlen\n']
+    print_flag = True
 
     last_play = -1
     for frame_id, (vid_fnum, play_num, frame) in enumerate(dataloader):
@@ -202,20 +210,32 @@ def imageflow_demo(dataloader, predictor, current_time, args, result_filename, v
             video_frame_fn = result_filename.replace('csv', 'png')
             cv2.imwrite(video_frame_fn, frame)
 
+        # Run tracker
+        frame_print = None
+        if vid_fnum >= 1870 and vid_fnum <= 1874:
+            frame_print = vid_fnum
+            cv2.imwrite(f'fr{vid_fnum}.png', frame)
+
         # Detect objects
-        outputs, img_info = predictor.inference(frame, timer)
+        outputs, img_info = predictor.inference(frame, timer, dump_input=frame_print)
         dets = outputs[0]
+        scale = min(exp.test_size[0] / float(img_info['height']),
+                    exp.test_size[1] / float(img_info['width']))
+
+        if print_flag:
+            w, h = img_info['width'], img_info['height']
+            print(f'img_size w,h = {w},{h}, scale={scale}')
+            print_flag = False
 
         if dets is not None:
             # scale bbox predictions according to image size
-            scale = min(exp.test_size[0] / float(img_info['height'], ), exp.test_size[1] / float(img_info['width']))
             outputs = outputs[0].cpu().numpy()
             detections = outputs[:, :7]
             detections[:, :4] /= scale
             classes = outputs[:, 6]
 
-            # Run tracker
-            online_targets = tracker.update(detections, img_info["raw_img"])
+            online_targets = tracker.update(detections, img_info["raw_img"],
+                                            frame_print=frame_print)
 
             online_tlwhs = []
             online_ids = []
@@ -237,15 +257,11 @@ def imageflow_demo(dataloader, predictor, current_time, args, result_filename, v
                     online_jumping.append(is_jumping)
                     online_nearfar.append(nearfar)
                     csv_str = (f'{vid_fnum},{tid},{tlwh[0]:.2f},{tlwh[1]:.2f},{tlwh[2]:.2f},'
-                               f'{tlwh[3]:.2f},{play_num},{cls_id},{is_jumping},{vid_fnum},'
+                               f'{tlwh[3]:.2f},{play_num},{nearfar},{is_jumping},{vid_fnum},'
                                f'{dxdy[0]},{dxdy[1]},{tlen}\n')
                     results.append(csv_str)
 
-            """
-            for idx, id in enumerate(online_ids):
-                cls_str = full_id_to_name[classes[idx]]
-                print(f'id {id} cls {cls_str}')
-            """
+            # print(f'class: {classes} online_nearfar {online_nearfar}')
             timer.toc()
 
             online_im = plot_tracking_mc(
@@ -280,7 +296,7 @@ def setup_volleyvision(args):
         result_root = osp.join(cfg.output_root, 'BotSort', exp.exp_name, args.match_name)
     os.makedirs(result_root, exist_ok=True)
 
-    setup_logger(result_root, filename="log.log", mode="a", )
+    setup_logger(result_root, filename="log.log")
 
     if args.play_vid:
         vid_basename = osp.splitext(osp.basename(args.play_vid))[0]
@@ -296,7 +312,7 @@ def setup_volleyvision(args):
     if args.tsize is not None:
         img_size = [int(x) for x in args.tsize.split(',')]
     else:
-        img_size = -1
+        img_size = None
     if args.play_vid:
         dataloader = LoadVideo(args.play_vid, img_size)
     else:

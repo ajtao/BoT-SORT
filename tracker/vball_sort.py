@@ -40,8 +40,8 @@ class STrack(BaseTrack):
         self.mean, self.covariance = None, None
         self.is_activated = False
 
-        self.jumping = False
-        self.prev_jumping = False
+        self.jumping = 0
+        self.prev_jumping = 0
         self.cls = -1
         self.cls_hist = []  # (cls id, freq)
         self.update_cls(cls, score)
@@ -79,9 +79,9 @@ class STrack(BaseTrack):
         if not hysteresis:
             self.jumping = jumping
         elif jumping and self.prev_jumping:
-            self.jumping = True
+            self.jumping = 1
         elif not jumping and not self.prev_jumping:
-            self.jumping = False
+            self.jumping = 0
         self.prev_jumping = jumping
 
     def update_cls(self, cls, score):
@@ -90,6 +90,9 @@ class STrack(BaseTrack):
 
         Set self.cls set to the class with max score
         """
+        self.cls = cls
+        return
+
         if len(self.cls_hist) > 0:
             max_freq = 0
             found = False
@@ -296,6 +299,10 @@ class VbSORT(object):
         self.track_low_thresh = args.track_low_thresh
         self.new_track_thresh = args.new_track_thresh
 
+        print("BoTSORT high det thresh: ", self.track_high_thresh)
+        print("BoTSORT low det thresh: ", self.track_low_thresh)
+        print("BoTSORT new track thresh: ", self.new_track_thresh)
+
         self.buffer_size = int(frame_rate / 30.0 * args.track_buffer)
         self.max_time_lost = self.buffer_size
         self.kalman_filter = KalmanFilter()
@@ -310,7 +317,7 @@ class VbSORT(object):
 
         self.gmc = GMC(method=args.cmc_method, verbose=[args.name, args.ablation])
 
-    def update(self, output_results, img):
+    def update(self, output_results, img, frame_print=None):
         """
         output_results = (N, {bbox, score, cls, feats})
         """
@@ -324,20 +331,25 @@ class VbSORT(object):
             bboxes = output_results[:, :4]
             scores = output_results[:, 4]
             if output_results.shape[1] == 6:
-                classes = output_results[:, 5]
+                full_classes = output_results[:, 5]
             elif output_results.shape[1] == 7:
                 scores2 = output_results[:, 5]
                 scores *= scores2
-                classes = output_results[:, 6]
+                full_classes = output_results[:, 6]
             else:
                 raise
 
-            jumping = np.copy(classes)
+            if frame_print is not None:
+                print(f'frame_id,x1,y1,x2,y2,nearfar,score')
+            classes = np.copy(full_classes)
+            jumping = np.copy(full_classes)
             for idx in range(output_results.shape[0]):
-                full_cls = classes[idx]
-                simple_cls = full_to_simple_cls_id[full_cls]
-                classes[idx] = simple_cls
+                full_cls = full_classes[idx]
+                classes[idx] = full_to_simple_cls_id[full_cls]
                 jumping[idx] = 'jump' in full_id_to_name[full_cls]
+
+                if frame_print is not None:
+                    print(f'{frame_print},{bboxes[idx]},{classes[idx]},{scores[idx]}')
 
             # features = output_results[:, 6:]
 

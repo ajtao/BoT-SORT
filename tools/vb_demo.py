@@ -212,9 +212,11 @@ def imageflow_demo(dataloader, predictor, current_time, args, result_filename, v
 
         # Run tracker
         frame_print = None
+        """
         if vid_fnum >= 1870 and vid_fnum <= 1874:
             frame_print = vid_fnum
             cv2.imwrite(f'fr{vid_fnum}.png', frame)
+        """
 
         # Detect objects
         outputs, img_info = predictor.inference(frame, timer, dump_input=frame_print)

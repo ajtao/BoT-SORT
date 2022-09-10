@@ -196,10 +196,10 @@ def image_demo(predictor, vis_folder, current_time, args):
 
         # result_image = predictor.visual(outputs[0], img_info, predictor.confthre)
         if args.save_result:
-            timestamp = time.strftime("%Y_%m_%d_%H_%M_%S", current_time)
-            save_folder = osp.join(vis_folder, timestamp)
-            os.makedirs(save_folder, exist_ok=True)
-            cv2.imwrite(osp.join(save_folder, osp.basename(img_path)), online_im)
+            #timestamp = time.strftime("%Y_%m_%d_%H_%M_%S", current_time)
+            #save_folder = osp.join(vis_folder, timestamp)
+            #os.makedirs(save_folder, exist_ok=True)
+            cv2.imwrite(osp.join(vis_folder, osp.basename(img_path)), online_im)
 
         if frame_id % 20 == 0:
             logger.info('Processing frame {} ({:.2f} fps)'.format(frame_id, 1. / max(1e-5, timer.average_time)))
@@ -221,8 +221,8 @@ def imageflow_demo(predictor, vis_folder, current_time, args):
     height = cap.get(cv2.CAP_PROP_FRAME_HEIGHT)  # float
     fps = cap.get(cv2.CAP_PROP_FPS)
     timestamp = time.strftime("%Y_%m_%d_%H_%M_%S", current_time)
-    save_folder = osp.join(vis_folder, timestamp)
-    os.makedirs(save_folder, exist_ok=True)
+    save_folder = vis_folder
+    #os.makedirs(save_folder, exist_ok=True)
     if args.demo == "video":
         save_path = osp.join(save_folder, args.path.split("/")[-1])
     else:

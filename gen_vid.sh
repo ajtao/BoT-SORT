@@ -20,7 +20,7 @@ export PYTHONPATH=$PWD:${PWD}/../vball_tracking:../player_id:../vball-mmdet
 export CUDA_VISIBLE_DEVICES=0
 
 GPU=0
-TAG="BotSORT_8_2"
+TAG="BotSORT_trackv1"
 MAXPLAYS=5
 
 while getopts 'jg:m:t:p:hv' opt; do
@@ -62,10 +62,10 @@ done
 shift "$(($OPTIND -1))"
 
 
-MATCHES_0=( 20210919_kentucky_stanford 20211001_arizonastate_stanford 20211002_olemiss_florida)
+MATCHES_0=( 20210919_kentucky_stanford 20211001_arizonastate_stanford)
 MATCHES_0=( 20211002_olemiss_florida)
-# MATCHES_1=( 20211124_usc_stanford 20211209_louisville_florida 20211014_tcu_texas)
 MATCHES_1=( )
+MATCHES_1=( 20211124_usc_stanford  20211014_tcu_texas 20211209_louisville_florida)
 ALL=("${MATCHES_0[@]}" "${MATCHES_1[@]}")
 echo "m0 ${MATCHES_0[@]}"
 echo "m1 ${MATCHES_1[@]}"
@@ -90,8 +90,9 @@ else
     AH_OPTS="--jumping-posadj --assign-canonical --id-players --canonical-id-frame-offset 0 --backproject --smooth-bev"
 fi
 
-MODELS=( yolox_x_fullcourt_v7_2)
 MODELS=( yolox_x_fullcourt_v8_2)
+MODELS=( yolox_x_fullcourt_v7_2)
+MODELS=( yolox_x_tracked_players_v1baseline)
 EXP=yolox_x_fullcourt
 CFG="-f ../ByteTrack/exps/example/mot/${EXP}.py"
 

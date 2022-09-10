@@ -131,8 +131,9 @@ class Predictor(object):
         self.num_classes = exp.num_classes
         self.confthre = exp.test_conf
         self.nmsthre = exp.nmsthre
-        print(f'BotSORT postproc conf_thresh {self.confthre}, nms thresh {self.nmsthre}')
         self.test_size = exp.test_size
+        print(f'BotSORT preproc test size {self.test_size}')
+        print(f'BotSORT postproc conf_thresh {self.confthre}, nms thresh {self.nmsthre}')
         self.device = device
         self.fp16 = fp16
         if trt_file is not None:

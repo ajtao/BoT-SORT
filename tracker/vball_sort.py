@@ -348,6 +348,10 @@ class VbSORT(object):
                 classes[idx] = full_to_simple_cls_id[full_cls]
                 jumping[idx] = 'jump' in full_id_to_name[full_cls]
 
+                # throw out balls
+                if classes[idx] == simple_class_ids['ball']:
+                    scores[idx] = 0
+
                 if frame_print is not None:
                     print(f'{frame_print},{bboxes[idx]},{classes[idx]},{scores[idx]}')
 

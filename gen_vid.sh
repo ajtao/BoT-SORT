@@ -16,14 +16,14 @@
 # > bash gen_vid.sh -g 0 -t all-in-one -p 3 -v
 
 
-export PYTHONPATH=$PWD:${PWD}/../vball_tracking:../player_id:../vball-mmdet
+export PYTHONPATH=$PWD:${PWD}/../vball_tracking:../player_id:../vball-mmdet:${PWD}/../PyTrackNet
 export CUDA_VISIBLE_DEVICES=0
 
 GPU=0
-TAG="BotSORT_trackv1"
+TAG="BotSORT_8_2"
 MAXPLAYS=5
 
-while getopts 'jg:m:t:p:hv' opt; do
+while getopts 'jg:m:t:p:h' opt; do
     case "$opt" in
 	g)
 	    GPU="$OPTARG"
@@ -49,10 +49,6 @@ while getopts 'jg:m:t:p:hv' opt; do
 	    echo "Set MAXPLAYS to $MAXPLAYS"
 	    ;;
 
-	v)
-	    VIZVID="True"
-	    ;;
-
 	?|h)
 	    echo "Usage: $(basename $0) [-m match] [-g gpu]"
 	    exit 1
@@ -63,9 +59,19 @@ shift "$(($OPTIND -1))"
 
 
 MATCHES_0=( 20210919_kentucky_stanford 20211001_arizonastate_stanford)
-MATCHES_0=( 20211002_olemiss_florida)
-MATCHES_1=( )
-MATCHES_1=( 20211124_usc_stanford  20211014_tcu_texas 20211209_louisville_florida)
+MATCHES_0=( 20211209_louisville_florida)
+MATCHES_0=( 20210919_kentucky_stanford)
+MATCHES_0=( 20211218_jas_rad)
+MATCHES_0=( 20211218_rze_zaw)
+MATCHES_0=( 20220723_poland_usa_right)
+MATCHES_1=( 20211002_olemiss_florida 20211021_iowastate_texas)
+MATCHES_1=( 20211124_usc_stanford  20211014_tcu_texas )
+
+if [[ -v SINGLE_MATCH ]];
+then
+    MATCHES_0=( $SINGLE_MATCH)
+fi
+
 ALL=("${MATCHES_0[@]}" "${MATCHES_1[@]}")
 echo "m0 ${MATCHES_0[@]}"
 echo "m1 ${MATCHES_1[@]}"
@@ -90,13 +96,17 @@ else
     AH_OPTS="--jumping-posadj --assign-canonical --id-players --canonical-id-frame-offset 0 --backproject --smooth-bev"
 fi
 
-MODELS=( yolox_x_fullcourt_v8_2)
 MODELS=( yolox_x_fullcourt_v7_2)
 MODELS=( yolox_x_tracked_players_v1baseline)
+MODELS=( yolox_x_fullcourt_640p_v8_2_every)
+MODELS=( yolox_x_fullcourt_v8_2)
 EXP=yolox_x_fullcourt
 CFG="-f ../ByteTrack/exps/example/mot/${EXP}.py"
 
+PYTRACKNET_MODEL="romantic-bobcat_TrackJointTouch_77-v5-fr1_fix"
 BOT_HPARAMS="--nms 0.65 --track_high_thresh 0.5 --new_track_thresh 0.6"
+PYTRACKNET_WEIGHTS="/mnt/g/output/PyTrackNet/skill/${PYTRACKNET_MODEL}/latest.pt"
+PYTRACKNET_OUTPUT="/mnt/g/output/PyTrackNet/eval/${PYTRACKNET_MODEL}"
 
 for MODEL in "${MODELS[@]}"
 do
@@ -106,20 +116,28 @@ do
 	echo "WORKING ON MATCH $MATCH"
 
 	# Run Tracker ...
-	CKPT="/mnt/g/output/ByteTrack/YOLOX_outputs/${MODEL}/latest_ckpt.pth.tar"
-	CMD="python tools/vb_demo.py  --fp16 --fuse --match-name $MATCH --view end0 --ckpt $CKPT  $CFG \
-    	     --tag $TAG --max-plays $MAXPLAYS --start-pad 2 --end-pad 1 $XYWH $BOT_HPARAMS"
-	echo $CMD
-	$CMD
-	echo $CMD > /mnt/g/output/BotSort/${TAG}/${EXP}/${MATCH}/cmd.sh
-
-	# Run heuristics ...
-	if [[ -v VIZVID ]];
-	then
-	    VIZVID="--viz-vid /mnt/g/output/PyTrackNet/autolabel/all-in-one_spotted-coucal_TrackJointTouch_77-v6-newval/${MATCH}.mp4"
-	else
-	    VIZVID=""
+	TRK_VID="/mnt/g/output/BotSort/${TAG}/yolox_x_fullcourt/${MATCH}/end0.mp4"
+	if test ! -f "$TRK_VID"; then
+	    CKPT="/mnt/g/output/ByteTrack/YOLOX_outputs/${MODEL}/latest_ckpt.pth.tar"
+	    CMD="python tools/vb_demo.py  --fp16 --fuse --match-name $MATCH --view end0 --ckpt $CKPT  $CFG \
+	    	 --tag $TAG --max-plays $MAXPLAYS --start-pad 2 --end-pad 1 $XYWH $BOT_HPARAMS "
+	    echo $CMD
+	    $CMD
+	    echo $CMD > /mnt/g/output/BotSort/${TAG}/${EXP}/${MATCH}/cmd.sh
 	fi
+
+	# Generate ball predictions
+	BALL_VID="${PYTRACKNET_OUTPUT}/${MATCH}.mp4"
+	if test ! -f "$BALL_VID"; then
+	    pushd ../PyTrackNet
+	    CMD="python auto_label.py --load_weights $PYTRACKNET_WEIGHTS --eval --eval_match $MATCH"
+	    echo $CMD
+	    $CMD
+	    popd
+	fi
+	VIZVID="--viz-vid $BALL_VID"
+
+	# Glue everything together ...
 	TRK_CSV="/mnt/g/output/BotSort/${TAG}/${EXP}/${MATCH}/end0.csv"
 	CMD="python ../vball_tracking/apply_heuristics.py --match-name $MATCH --tracking-csv $TRK_CSV --view end0 --tag $TAG $AH_OPTS $VIZVID"
 	echo $CMD

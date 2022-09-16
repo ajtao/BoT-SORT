@@ -39,7 +39,7 @@ def make_parser():
     parser.add_argument("--device", default="gpu", type=str, help="device to run our model, can either be cpu or gpu")
     parser.add_argument("--conf", default=None, type=float, help="test conf")
     parser.add_argument("--nms", default=0.65, type=float, help="test nms threshold")
-    parser.add_argument("--tsize", default=None, type=int, help="test img size")
+    parser.add_argument("--tsize", default=None, type=str, help="test img size (w,h)")
     parser.add_argument("--fps", default=30, type=int, help="frame rate (fps)")
     parser.add_argument("--fp16", dest="fp16", default=False, action="store_true",help="Adopting mix precision evaluating.")
     parser.add_argument("--fuse", dest="fuse", default=False, action="store_true", help="Fuse conv and bn for testing.")
@@ -59,7 +59,8 @@ def make_parser():
                         help=("cmc method: files (Vidstab GMC) | orb | ecc"
                               "But we shouldn't need CMC with vb, so defaulting to off"))
     # ReID
-    parser.add_argument("--with-reid", dest="with_reid", default=True, action="store_true", help="use reid model")
+    # parser.add_argument("--with-reid", dest="with_reid", default=True, action="store_true", help="use reid model")
+    parser.add_argument("--no-reid", dest="with_reid", default=True, action='store_false', help="don't use reid model")
     parser.add_argument("--fast-reid-config", dest="fast_reid_config", default=r"fast_reid/configs/MOT17/sbs_S50.yml", type=str, help="reid config file path")
     parser.add_argument("--fast-reid-weights", dest="fast_reid_weights", default=r"pretrained/mot17_sbs_S50.pth", type=str,help="reid config file path")
     parser.add_argument('--proximity_thresh', type=float, default=0.5, help='threshold for rejecting low overlap reid matches')
@@ -319,14 +320,17 @@ def setup_volleyvision(args):
     if args.play_vid:
         dataloader = LoadVideo(args.play_vid, img_size)
     else:
+        mobj = Match(args.match_name,
+                     args.view,
+                     args.max_plays,
+                     use_offset=False,
+                     start_pad=args.start_pad,
+                     end_pad=args.end_pad)
         try:
-            mobj = Match(args.match_name, args.view, args.max_plays,
-                         use_offset=False,
-                         start_pad=args.start_pad,
-                         end_pad=args.end_pad)
+            pass
         except:
             print(f'ERROR: some problem reading in match {args.match_name} ... SKIPPING')
-            return
+            raise
 
         dataloader = LoadVideo(mobj.vid_fn, img_size,
                                plays=mobj.plays)
@@ -364,7 +368,7 @@ def main(exp, args):
     if args.nms is not None:
         exp.nmsthre = args.nms
     if args.tsize is not None:
-        exp.test_size = (args.tsize, args.tsize)
+        exp.test_size = [int(x) for x in args.tsize.split(',')]
 
     model = exp.get_model().to(args.device)
     logger.info("Model Summary: {}".format(get_model_info(model, exp.test_size)))

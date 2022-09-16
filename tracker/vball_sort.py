@@ -383,7 +383,7 @@ class VbSORT(object):
             jumping_keep = []
 
         '''Extract embeddings '''
-        assert self.args.with_reid, f'VbSORT requires reid for now'
+        # assert self.args.with_reid, f'VbSORT requires reid for now'
         if self.args.with_reid:
             features_keep = self.encoder.inference(img, dets)
 

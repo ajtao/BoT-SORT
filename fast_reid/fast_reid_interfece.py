@@ -10,7 +10,8 @@ from fast_reid.fastreid.modeling.meta_arch import build_model
 from fast_reid.fastreid.utils.checkpoint import Checkpointer
 from fast_reid.fastreid.engine import DefaultTrainer, default_argument_parser, default_setup, launch
 
-# cudnn.benchmark = True
+# torch.backends.cudnn.benchmark = True
+import time
 
 
 def setup_cfg(config_file, opts):
@@ -50,7 +51,7 @@ def preprocess(image, input_size):
 
 
 class FastReIDInterface:
-    def __init__(self, config_file, weights_path, device, batch_size=8):
+    def __init__(self, config_file, weights_path, device, batch_size=16):
         super(FastReIDInterface, self).__init__()
         if device != 'cpu':
             self.device = 'cuda'
@@ -74,7 +75,6 @@ class FastReIDInterface:
         self.pH, self.pW = self.cfg.INPUT.SIZE_TEST
 
     def inference(self, image, detections):
-
         if detections is None or np.size(detections) == 0:
             return []
 
@@ -119,7 +119,19 @@ class FastReIDInterface:
         features = np.zeros((0, 2048))
         # features = np.zeros((0, 768))
 
+        # print(f'batch_patches {batch_patches[0].shape}, {len(batch_patches)}')
         for patches in batch_patches:
+            """
+            # Play with artificially boosting batch size to test speed ...
+
+            # bs multiplier
+            mult = 1
+            bs = patches.shape[0]
+            pp = []
+            for i in range(mult):
+                pp.append(patches)
+            patches = torch.cat(pp, dim=0)
+            """
 
             # Run model
             patches_ = torch.clone(patches)
@@ -145,7 +157,10 @@ class FastReIDInterface:
                         plt.imshow(patch_np)
                         plt.show()
 
+            """
+            # strip bs multiplier
+            feat = feat[:bs, ...]
+            """
             features = np.vstack((features, feat))
 
         return features
-

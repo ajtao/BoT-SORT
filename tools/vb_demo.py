@@ -33,7 +33,6 @@ def make_parser():
     parser.add_argument("-n", "--name", type=str, default=None, help="model name")
     parser.add_argument("--path", default="", help="path to images or video")
     parser.add_argument("--camid", type=int, default=0, help="webcam demo camera id")
-    parser.add_argument("--save_result", action="store_true",help="whether to save the inference result of image/video")
     parser.add_argument("-f", "--exp_file", default=None, type=str, help="pls input your expriment description file")
     parser.add_argument("-c", "--ckpt", default=None, type=str, help="ckpt for eval")
     parser.add_argument("--device", default="gpu", type=str, help="device to run our model, can either be cpu or gpu")
@@ -85,10 +84,13 @@ def make_parser():
         "--max-plays", default=None, type=int, help="max plays"
     )
     parser.add_argument(
-        "--start-pad", type=int, default=1,
+        "--max-frames", default=None, type=int, help="max frames"
     )
     parser.add_argument(
-        "--end-pad", type=int, default=1,
+        "--start-pad", type=int, default=2,
+    )
+    parser.add_argument(
+        "--end-pad", type=int, default=2,
     )
     return parser
 
@@ -198,7 +200,6 @@ def imageflow_demo(dataloader, predictor, current_time, args, result_filename, v
     frame_id = 0
     results = ['frame,id,x1,y1,w,h,play,class,is_jumping,ori_fnum,dx,dy,tlen\n']
     print_flag = True
-
     last_play = -1
     for frame_id, (vid_fnum, play_num, frame) in enumerate(dataloader):
         if play_num != last_play:
@@ -214,11 +215,6 @@ def imageflow_demo(dataloader, predictor, current_time, args, result_filename, v
 
         # Run tracker
         frame_print = None
-        """
-        if vid_fnum >= 1870 and vid_fnum <= 1874:
-            frame_print = vid_fnum
-            cv2.imwrite(f'fr{vid_fnum}.png', frame)
-        """
 
         # Detect objects
         outputs, img_info = predictor.inference(frame, timer, dump_input=frame_print)
@@ -228,7 +224,7 @@ def imageflow_demo(dataloader, predictor, current_time, args, result_filename, v
 
         if print_flag:
             w, h = img_info['width'], img_info['height']
-            print(f'img_size w,h = {w},{h}, scale={scale}')
+            print(f'img_size w,h = {w},{h}, scale={scale:2.4f}')
             print_flag = False
 
         if dets is not None:
@@ -236,8 +232,6 @@ def imageflow_demo(dataloader, predictor, current_time, args, result_filename, v
             outputs = outputs[0].cpu().numpy()
             detections = outputs[:, :7]
             detections[:, :4] /= scale
-            classes = outputs[:, 6]
-
             online_targets = tracker.update(detections, img_info["raw_img"],
                                             frame_print=frame_print)
 
@@ -265,7 +259,6 @@ def imageflow_demo(dataloader, predictor, current_time, args, result_filename, v
                                f'{dxdy[0]},{dxdy[1]},{tlen}\n')
                     results.append(csv_str)
 
-            # print(f'class: {classes} online_nearfar {online_nearfar}')
             timer.toc()
 
             online_im = plot_tracking_mc(
@@ -344,17 +337,6 @@ def setup_volleyvision(args):
 
 
 def main(exp, args):
-    """
-    if not args.experiment_name:
-        args.experiment_name = exp.exp_name
-
-    output_dir = osp.join(exp.output_dir, args.experiment_name)
-    os.makedirs(output_dir, exist_ok=True)
-
-    if args.save_result:
-        vis_folder = osp.join(output_dir, "track_vis")
-        os.makedirs(vis_folder, exist_ok=True)
-    """
     result_root, result_filename, vid_writer, court, dataloader = setup_volleyvision(args)
 
     if args.trt:

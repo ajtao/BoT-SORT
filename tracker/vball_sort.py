@@ -40,6 +40,8 @@ class STrack(BaseTrack):
         self.mean, self.covariance = None, None
         self.is_activated = False
 
+        #if jumping:
+        #    print(f'started STrack with jumping tlwh {tlwh} cls {cls}')
         self.jumping = 0
         self.prev_jumping = 0
         self.cls = -1
@@ -67,7 +69,7 @@ class STrack(BaseTrack):
         self.features.append(feat)
         self.smooth_feat /= np.linalg.norm(self.smooth_feat)
 
-    def update_jumping(self, jumping, hysteresis=True):
+    def update_jumping(self, jumping, hysteresis=False):
         """
         We implement a little hysteresis:
           Need to back-to-back to turn on, 2 to turn off.

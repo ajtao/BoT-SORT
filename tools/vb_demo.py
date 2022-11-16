@@ -302,6 +302,7 @@ def setup_volleyvision(args):
         result_filename = os.path.join(result_root, f'{args.view}.csv')
 
     print(f'Max plays {args.max_plays}')
+    print(f'Max frames {args.max_frames}')
 
     if not args.experiment_name:
         args.experiment_name = exp.exp_name
@@ -325,8 +326,11 @@ def setup_volleyvision(args):
             print(f'ERROR: some problem reading in match {args.match_name} ... SKIPPING')
             raise
 
-        dataloader = LoadVideo(mobj.vid_fn, img_size,
-                               plays=mobj.plays)
+        dataloader = LoadVideo(mobj.vid_fn,
+                               img_size,
+                               plays=mobj.plays,
+                               max_frames=args.max_frames)
+
     output_video_path = osp.join(result_root, f'{args.view}.mp4')
     vid_writer = cv2.VideoWriter(
         output_video_path, cv2.VideoWriter_fourcc(*"mp4v"),

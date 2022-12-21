@@ -139,6 +139,7 @@ class Predictor(object):
         print(f'BotSORT postproc conf_thresh {self.confthre}, nms thresh {self.nmsthre}')
         self.device = device
         self.fp16 = fp16
+        self.trt = trt_file is not None
         if trt_file is not None:
             from torch2trt import TRTModule
 
@@ -146,6 +147,8 @@ class Predictor(object):
             model_trt.load_state_dict(torch.load(trt_file))
 
             x = torch.ones((1, 3, exp.test_size[0], exp.test_size[1]), device=device)
+            if self.fp16:
+                x = x.half()
             self.model(x)
             self.model = model_trt
         self.rgb_means = (0.485, 0.456, 0.406)
@@ -167,7 +170,7 @@ class Predictor(object):
         img, ratio = preproc(img, self.test_size, self.rgb_means, self.std)
         img_info["ratio"] = ratio
         img = torch.from_numpy(img).unsqueeze(0).float().to(self.device)
-        if self.fp16:
+        if self.fp16 and not self.trt:
             img = img.half()  # to FP16
 
         with torch.no_grad():
@@ -380,10 +383,11 @@ def main(exp, args):
 
     if args.trt:
         assert not args.fuse, "TensorRT model is not support model fusing!"
-        trt_file = osp.join(result_root, "model_trt.pth")
+        trt_file = osp.join('/mnt/f/output/ByteTrack/YOLOX_outputs/yolox_l_fullcourt_v5bytetrack-with-bad-touches-trt_bs1', "model_trt.pth")
+        trt_file = osp.join('/mnt/f/output/ByteTrack/YOLOX_outputs/yolox_x_fullcourt_v5bytetrack-with-bad-touches-trt', "model_trt.pth")
         assert osp.exists(
             trt_file
-        ), "TensorRT model is not found!\n Run python3 tools/trt.py first!"
+        ), f"TensorRT model {trt_file} is not found!\n Run python3 tools/trt.py first!"
         model.head.decode_in_inference = False
         decoder = model.head.decode_outputs
         logger.info("Using TensorRT to inference")

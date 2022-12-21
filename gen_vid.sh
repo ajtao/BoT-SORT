@@ -17,7 +17,7 @@ export PYTHONPATH=$PWD:${PWD}/../vball_tracking:../player_id:../vball-mmdet:${PW
 export CUDA_VISIBLE_DEVICES=0
 
 GPU=0
-TAG="35plays"
+TAG="v5_12k_frames"
 FORCE=""
 
 while getopts 'jfg:m:t:p:h' opt; do
@@ -72,7 +72,13 @@ MATCHES_1=(/mnt/g/data/vball/ball/skill_touches_ball/20*[5-9]_*)
 MATCHES_0=(/mnt/g/data/vball/ball/skill_touches_ball/20220911_brazil_slovenia_left)
 MATCHES_0=( 20220911_brazil_slovenia_left 20210919_kentucky_stanford)
 MATCHES_1=( 20220908_poland_usa_left 20211002_olemiss_florida)
-
+MATCHES_0=( 20220713_usa_serbia_left 20220716_turkiye_italy_right)
+MATCHES_1=( 20220713_brazil_japan_right)
+MATCHES_0=( 20220716_turkiye_italy_right)
+MATCHES_0=( 20220713_brazil_japan_right 20220713_usa_serbia_left 20220713_usa_serbia_right 20220714_italy_china_left 20220714_italy_china_right 20220717_turkiye_serbia_left)
+MATCHES_1=( 20220714_turkiye_thailand_left 20220714_turkiye_thailand_right 20220716_serbia_brazil_left 20220716_serbia_brazil_right 20220716_turkiye_italy_left 20220716_turkiye_italy_right 20220717_turkiye_serbia_right)
+ 
+ 
 if [[ -v SINGLE_MATCH ]];
 then
     MATCHES_0=( $SINGLE_MATCH)
@@ -101,8 +107,10 @@ MODELS=( yolox_x_fullcourt_v7_2)
 MODELS=( yolox_x_tracked_players_v1baseline)
 MODELS=( yolox_x_fullcourt_640p_v8_2_every)
 MODELS=( yolox_x_fullcourt_v8_2)
-MODELS=( yolox_x_fullcourt_v5bytetrack-with-bad-touches)
+MODELS=( yolox_l_fullcourt_v5bytetrack-with-bad-touches-trt)
+MODELS=( yolox_x_fullcourt_v5bytetrack-with-bad-touches-trt)
 
+EXP=yolox_l_fullcourt
 EXP=yolox_x_fullcourt
 CFG="-f ../ByteTrack/exps/example/mot/${EXP}.py"
 
@@ -112,8 +120,7 @@ PYTRACKNET_MODEL="muscular-whale_TrackJointTouch_v9_30_55"
 PYTRACKNET_WEIGHTS="/mnt/f/output/PyTrackNet/skill/${PYTRACKNET_MODEL}/latest.pt"
 PYTRACKNET_OUTPUT="/mnt/f/output/PyTrackNet/eval/${PYTRACKNET_MODEL}"
 
-#MAX_PLAYS="--max-plays 3"
-#MAX_PFRAMES="--max_pframes 1000"
+MAX_PLAYS="--max-plays 3"
 
 
 for MODEL in "${MODELS[@]}"
@@ -129,12 +136,13 @@ do
 	TRK_VID="/mnt/f/output/BotSort/${TAG}/${EXP}/${MATCH}/end0.mp4"
 	TRK_CSV="/mnt/f/output/BotSort/${TAG}/${EXP}/${MATCH}/end0.csv"
 	if test ! -f "${TRK_VID}${FORCE}"; then
-	    CMD="python tools/vb_demo.py  --fp16 --fuse --match-name $MATCH --view end0 \
+	    CMD="python tools/vb_demo.py --match-name $MATCH --view end0 \
                  --ckpt $BYTE_CKPT $CFG --tag $TAG --start-pad 2 --end-pad 1 $BOT_HPARAMS \
-                 $MAX_PLAYS"
+                 $MAX_PLAYS --fp16 --trt"
+	    # --fp16 --fuse --trt
 	    #echo $CMD
 	    #$CMD
-	    #echo $CMD > /mnt/f/output/BotSort/${TAG}/${EXP}/${MATCH}/cmd.sh
+	    echo $CMD > /mnt/f/output/BotSort/${TAG}/${EXP}/${MATCH}/cmd.sh
 	fi
 
 	# Generate ball predictions
@@ -165,19 +173,21 @@ do
 	VID="/mnt/g/data/vball/squashed/squashed/${MATCH}/end0.mp4"
  
 	CMD="python demo/top_down_video_demo_with_bot.py $POSE_CFG $POSE_CKPT --video-path $VID \
-             --output-root /mnt/f/output/mmpose/${TAG} --tracking-csv $CSV_12P $MAX_PFRAMES"
-	#echo $CMD
+             --output-root /mnt/f/output/mmpose/${TAG} --tracking-csv $CSV_12P \
+	     --match $MATCH $MAX_PLAYS --save-vid"
+	echo $CMD
 	#$CMD
 	popd
-
+	exit
+ 
 	# Now we can run ActionDetection
 	pushd ../PyTrackNet
-	RUN=keen-ladybug
-	AD_TAG=drop_losswt
+	AD_RUN=complex-cow
+	AD_TAG=moredata_newbaseline
 	EPOCH=148
 	BALL_CSV=/mnt/f/output/PyTrackNet/eval/muscular-whale_TrackJointTouch_v9_30_55/${MATCH}.csv
 	POSE_CSV=/mnt/f/output/mmpose/${TAG}/botsort_${MATCH}_hrnet_w48_coco_256x192.csv
-	SKILL_WEIGHTS=/mnt/f/output/ActionDet/skill/${RUN}_ActionEncoderV2_${AD_TAG}/${AD_TAG}_model_${EPOCH}.pt
+	SKILL_WEIGHTS=/mnt/f/output/ActionDet/skill/${AD_RUN}_ActionEncoderV2_${AD_TAG}/${AD_TAG}_model_${EPOCH}.pt
 	VID_FN=/mnt/f/output/PyTrackNet/eval/muscular-whale_TrackJointTouch_v9_30_55/${MATCH}.mp4
 	CMD="python scripts/auto_label.py \
 	   --temporal-eval --window-pad 2 --window-slide-div 1 \
@@ -186,13 +196,15 @@ do
 	   --eval-match $MATCH --pose-csv $POSE_CSV --ball-csv $BALL_CSV \
 	   --action-weights $SKILL_WEIGHTS \
 	   --load_weights $PYTRACKNET_WEIGHTS --vid-fn $VID_FN "
-	#echo $CMD
-	#$CMD
+	echo $CMD
+	$CMD
 	popd
 
 	# Final heuristics run
-	TOUCH_CSV="/mnt/f/output/PyTrackNet/skill-eval/keen-ladybug/${MATCH}/touch.csv"
-	VIZ_VID="/mnt/f/output/PyTrackNet/skill-eval/keen-ladybug/${MATCH}/${MATCH}_keen-ladybug.mp4"
+	TOUCH_CSV="/mnt/f/output/PyTrackNet/skill-eval/${AD_RUN}/${MATCH}/touch.csv"
+	VIZ_VID="/mnt/f/output/mmpose/v5_12k_frames/botsort_${MATCH}_hrnet_w48_coco_256x192.mp4"
+	VIZ_VID="/mnt/f/output/PyTrackNet/skill-eval/${AD_RUN}/${MATCH}/${MATCH}_${AD_RUN}.mp4"
+	VIZ_VID=/mnt/f/output/PyTrackNet/eval/muscular-whale_TrackJointTouch_v9_30_55/${MATCH}.mp4
 	HEUR_CSV="/mnt/f/output/heuristics/${TAG}/${MATCH}/end0.csv"
 
 	if test ! -f "${HEUR_CSV}${FORCE}"; then
@@ -201,7 +213,7 @@ do
 	      --tracking-csv $TRK_CSV \
               --view end0 --tag ${TAG} --jumping-posadj --assign-canonical \
 	      --backproject --smooth-bev --task visualize \
- 	      --max-plays 60 \
+ 	      $MAX_PLAYS \
               --touch-csv $TOUCH_CSV \
               --show-bev-ball --ball-csv $BALL_CSV --id-players \
 	      --viz-vid $VIZ_VID"

@@ -17,10 +17,13 @@ export PYTHONPATH=$PWD:${PWD}/../vball_tracking:../player_id:../vball-mmdet:${PW
 export CUDA_VISIBLE_DEVICES=0
 
 GPU=0
-TAG="v5_12k_frames"
 FORCE=""
+TAG="v5_12k_frames"
+MAX_PLAYS="--max-plays 5"
 
-while getopts 'jfg:m:t:p:h' opt; do
+
+
+while getopts 'jfg:m:p:t:h' opt; do
     case "$opt" in
 	f)
 	    FORCE="FORCE"
@@ -35,6 +38,11 @@ while getopts 'jfg:m:t:p:h' opt; do
 	m)
 	    SINGLE_MATCH="$OPTARG"
 	    echo "Will run just match $SINGLE_MATCH"
+	    ;;
+
+	p)
+	    MAX_PLAYS="--max-plays $OPTARG"
+	    echo "Setting max-plays to $MAX_PLAYS"
 	    ;;
 
 	t)
@@ -77,6 +85,7 @@ MATCHES_1=( 20220713_brazil_japan_right)
 MATCHES_0=( 20220716_turkiye_italy_right)
 MATCHES_0=( 20220713_brazil_japan_right 20220713_usa_serbia_left 20220713_usa_serbia_right 20220714_italy_china_left 20220714_italy_china_right 20220717_turkiye_serbia_left)
 MATCHES_1=( 20220714_turkiye_thailand_left 20220714_turkiye_thailand_right 20220716_serbia_brazil_left 20220716_serbia_brazil_right 20220716_turkiye_italy_left 20220716_turkiye_italy_right 20220717_turkiye_serbia_right)
+MATCHES_0=( 20221217_texas_louisville 20221215_texas_usd)
  
  
 if [[ -v SINGLE_MATCH ]];
@@ -120,8 +129,6 @@ PYTRACKNET_MODEL="muscular-whale_TrackJointTouch_v9_30_55"
 PYTRACKNET_WEIGHTS="/mnt/f/output/PyTrackNet/skill/${PYTRACKNET_MODEL}/latest.pt"
 PYTRACKNET_OUTPUT="/mnt/f/output/PyTrackNet/eval/${PYTRACKNET_MODEL}"
 
-MAX_PLAYS="--max-plays 3"
-
 
 for MODEL in "${MODELS[@]}"
 do
@@ -140,8 +147,8 @@ do
                  --ckpt $BYTE_CKPT $CFG --tag $TAG --start-pad 2 --end-pad 1 $BOT_HPARAMS \
                  $MAX_PLAYS --fp16 --trt"
 	    # --fp16 --fuse --trt
-	    #echo $CMD
-	    #$CMD
+	    echo $CMD
+	    $CMD&
 	    echo $CMD > /mnt/f/output/BotSort/${TAG}/${EXP}/${MATCH}/cmd.sh
 	fi
 
@@ -152,41 +159,44 @@ do
 	    pushd ../PyTrackNet
 	    CMD="python scripts/auto_label.py --load_weights $PYTRACKNET_WEIGHTS --eval \
 	    	 --eval-match $MATCH $MAX_PLAYS"
-	    #echo $CMD
-	    #$CMD
+	    echo $CMD
+	    $CMD&
 	    popd
 	fi
+	wait
 
 	# Just run heuristics to isolate 12 players
 	HEUR_CSV="/mnt/f/output/heuristics/${TAG}/${MATCH}/end0.csv"
 	CMD="python ../vball_tracking/apply_heuristics.py --match-name $MATCH \
              --tracking-csv $TRK_CSV \
              --view end0 --tag ${TAG}_just_tracks --task just_tracks $MAX_PLAYS"
-	#echo $CMD
-	#$CMD
+	echo $CMD
+	$CMD
 
 	# mmpose
-	pushd ../mmpose
 	POSE_CFG=configs/body/2d_kpt_sview_rgb_img/topdown_heatmap/coco/hrnet_w48_coco_256x192.py
 	POSE_CKPT=https://download.openmmlab.com/mmpose/top_down/hrnet/hrnet_w48_coco_256x192-b9e0b3ab_20200708.pth
 	CSV_12P="/mnt/f/output/heuristics/${TAG}_just_tracks/${MATCH}/end0.csv"
 	VID="/mnt/g/data/vball/squashed/squashed/${MATCH}/end0.mp4"
- 
-	CMD="python demo/top_down_video_demo_with_bot.py $POSE_CFG $POSE_CKPT --video-path $VID \
-             --output-root /mnt/f/output/mmpose/${TAG} --tracking-csv $CSV_12P \
-	     --match $MATCH $MAX_PLAYS --save-vid"
-	echo $CMD
-	#$CMD
-	popd
-	exit
- 
+	POSE_CSV=/mnt/f/output/mmpose/${TAG}/botsort_${MATCH}_hrnet_w48_coco_256x192.csv
+	if test ! -f "${POSE_CSV}${FORCE}"; then
+	    pushd ../mmpose
+	    CMD="python demo/top_down_video_demo_with_bot.py $POSE_CFG $POSE_CKPT --video-path $VID \
+      		 --output-root /mnt/f/output/mmpose/${TAG} --tracking-csv $CSV_12P \
+ 		 --match $MATCH $MAX_PLAYS --save-vid"
+	    echo $CMD
+	    $CMD
+	    popd
+	fi
+
 	# Now we can run ActionDetection
 	pushd ../PyTrackNet
 	AD_RUN=complex-cow
 	AD_TAG=moredata_newbaseline
+	AD_RUN=watchful-dogfish
+	AD_TAG=all_trnval
 	EPOCH=148
 	BALL_CSV=/mnt/f/output/PyTrackNet/eval/muscular-whale_TrackJointTouch_v9_30_55/${MATCH}.csv
-	POSE_CSV=/mnt/f/output/mmpose/${TAG}/botsort_${MATCH}_hrnet_w48_coco_256x192.csv
 	SKILL_WEIGHTS=/mnt/f/output/ActionDet/skill/${AD_RUN}_ActionEncoderV2_${AD_TAG}/${AD_TAG}_model_${EPOCH}.pt
 	VID_FN=/mnt/f/output/PyTrackNet/eval/muscular-whale_TrackJointTouch_v9_30_55/${MATCH}.mp4
 	CMD="python scripts/auto_label.py \

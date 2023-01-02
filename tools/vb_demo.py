@@ -287,9 +287,6 @@ def imageflow_demo(dataloader, predictor, current_time, args, result_filename, v
 
 
 def setup_volleyvision(args):
-    if args.unsquashed:
-        cfg.match_root = '/mnt/g/data/vball/matches'
-
     if args.tag is not None:
         result_root = osp.join(cfg.output_root, 'BotSort', args.tag, exp.exp_name, args.match_name)
     else:
@@ -321,12 +318,14 @@ def setup_volleyvision(args):
                      args.view,
                      args.max_plays,
                      use_offset=False,
+                     unsquashed=args.unsquashed,
                      start_pad=args.start_pad,
                      end_pad=args.end_pad)
         try:
             pass
         except:
-            print(f'ERROR: some problem reading in match {args.match_name} ... SKIPPING')
+            print(f'ERROR: some problem reading in match {args.match_name} '
+                  '... SKIPPING')
             raise
 
         dataloader = LoadVideo(mobj.vid_fn,
@@ -383,8 +382,9 @@ def main(exp, args):
 
     if args.trt:
         assert not args.fuse, "TensorRT model is not support model fusing!"
-        trt_file = osp.join('/mnt/f/output/ByteTrack/YOLOX_outputs/yolox_l_fullcourt_v5bytetrack-with-bad-touches-trt_bs1', "model_trt.pth")
-        trt_file = osp.join('/mnt/f/output/ByteTrack/YOLOX_outputs/yolox_x_fullcourt_v5bytetrack-with-bad-touches-trt', "model_trt.pth")
+        model_dir = ('/mnt/f/output/ByteTrack/YOLOX_outputs/yolox_x_fullcourt_'
+                     'v5bytetrack-with-bad-touches-trt')
+        trt_file = osp.join(model_dir, "model_trt.pth")
         assert osp.exists(
             trt_file
         ), f"TensorRT model {trt_file} is not found!\n Run python3 tools/trt.py first!"

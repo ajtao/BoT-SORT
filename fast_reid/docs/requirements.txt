@@ -9,8 +9,8 @@ pyyaml
 yacs
 termcolor
 tabulate
-tensorboard
-opencv-python
+#tensorboard
+#opencv-python
 pyyaml
 yacs
 termcolor

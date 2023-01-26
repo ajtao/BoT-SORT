@@ -88,7 +88,17 @@ def detect(save_img=False):
     if device.type != 'cpu':
         model(torch.zeros(1, 3, imgsz, imgsz).to(device).type_as(next(model.parameters())))  # run once
     t0 = time.time()
+    null_model = True
+    last_pred = None
+    fnum = 0
+
     for path, img, im0s, vid_cap in dataset:
+        fnum += 1
+
+        if fnum % 20 == 0:
+            t_now = time_synchronized()
+            print('Processing frame {} ({:.2f} fps)'.format(fnum, fnum / (t_now - t0)))
+
         img = torch.from_numpy(img).to(device)
         img = img.half() if half else img.float()  # uint8 to fp16/32
         img /= 255.0  # 0 - 255 to 0.0 - 1.0
@@ -97,10 +107,16 @@ def detect(save_img=False):
 
         # Inference
         t1 = time_synchronized()
-        pred = model(img, augment=opt.augment)[0]
 
-        # Apply NMS
-        pred = non_max_suppression(pred, opt.conf_thres, opt.iou_thres, classes=opt.classes, agnostic=opt.agnostic_nms)
+        if null_model and last_pred is not None:
+            pred = last_pred
+        else:
+            pred = model(img, augment=opt.augment)[0]
+            # Apply NMS
+            pred = non_max_suppression(pred, opt.conf_thres, opt.iou_thres, classes=opt.classes, agnostic=opt.agnostic_nms)
+            if fnum > 20:
+                last_pred = pred
+
         t2 = time_synchronized()
 
         # Apply Classifier
@@ -152,6 +168,8 @@ def detect(save_img=False):
                         else:
                             label = f'{tid}, {names[int(tcls)]}'
                         plot_one_box(tlbr, im0, label=label, color=colors[int(tid) % len(colors)], line_thickness=2)
+            continue
+        
             p = Path(p)  # to Path
             save_path = str(save_dir / p.name)  # img.jpg
 

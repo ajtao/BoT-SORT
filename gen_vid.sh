@@ -19,7 +19,7 @@ export CUDA_VISIBLE_DEVICES=0
 GPU=0
 FORCE=""
 TAG="v5_12k_frames"
-MAX_PLAYS="--max-plays 5"
+MAX_PLAYS=""
 
 
 
@@ -85,7 +85,8 @@ MATCHES_1=( 20220713_brazil_japan_right)
 MATCHES_0=( 20220716_turkiye_italy_right)
 MATCHES_0=( 20220713_brazil_japan_right 20220713_usa_serbia_left 20220713_usa_serbia_right 20220714_italy_china_left 20220714_italy_china_right 20220717_turkiye_serbia_left)
 MATCHES_1=( 20220714_turkiye_thailand_left 20220714_turkiye_thailand_right 20220716_serbia_brazil_left 20220716_serbia_brazil_right 20220716_turkiye_italy_left 20220716_turkiye_italy_right 20220717_turkiye_serbia_right)
-MATCHES_0=( 20221217_texas_louisville 20221215_texas_usd)
+MATCHES_1=( 20220424_ols_rze 20220426_bel_jas 20220504_bel_zaw)
+MATCHES_0=( 20220415_rze_zaw 20220420_luk_suw 20220423_ked_zaw)
  
  
 if [[ -v SINGLE_MATCH ]];
@@ -145,11 +146,12 @@ do
 	if test ! -f "${TRK_VID}${FORCE}"; then
 	    CMD="python tools/vb_demo.py --match-name $MATCH --view end0 \
                  --ckpt $BYTE_CKPT $CFG --tag $TAG --start-pad 2 --end-pad 1 $BOT_HPARAMS \
-                 $MAX_PLAYS --fp16 --trt"
+                 $MAX_PLAYS --fp16 --trt --no-reid"
+            # $MAX_PLAYS --fp16 --trt"
 	    # --fp16 --fuse --trt
 	    echo $CMD
 	    $CMD&
-	    echo $CMD > /mnt/f/output/BotSort/${TAG}/${EXP}/${MATCH}/cmd.sh
+	    # echo $CMD > /mnt/f/output/BotSort/${TAG}/${EXP}/${MATCH}/cmd.sh
 	fi
 
 	# Generate ball predictions
@@ -172,16 +174,16 @@ do
              --view end0 --tag ${TAG}_just_tracks --task just_tracks $MAX_PLAYS"
 	echo $CMD
 	$CMD
-
+	
 	# mmpose
 	POSE_CFG=configs/body/2d_kpt_sview_rgb_img/topdown_heatmap/coco/hrnet_w48_coco_256x192.py
 	POSE_CKPT=https://download.openmmlab.com/mmpose/top_down/hrnet/hrnet_w48_coco_256x192-b9e0b3ab_20200708.pth
 	CSV_12P="/mnt/f/output/heuristics/${TAG}_just_tracks/${MATCH}/end0.csv"
-	VID="/mnt/g/data/vball/squashed/squashed/${MATCH}/end0.mp4"
+	VID="/mnt/g/data/vball/squashed/polish_men/${MATCH}/end0.mp4"
 	POSE_CSV=/mnt/f/output/mmpose/${TAG}/botsort_${MATCH}_hrnet_w48_coco_256x192.csv
 	if test ! -f "${POSE_CSV}${FORCE}"; then
 	    pushd ../mmpose
-	    CMD="python demo/top_down_video_demo_with_bot.py $POSE_CFG $POSE_CKPT --video-path $VID \
+	    CMD="python demo/top_down_video_demo_with_bot_trt.py $POSE_CFG --video-path $VID \
       		 --output-root /mnt/f/output/mmpose/${TAG} --tracking-csv $CSV_12P \
  		 --match $MATCH $MAX_PLAYS --save-vid"
 	    echo $CMD
@@ -195,6 +197,8 @@ do
 	AD_TAG=moredata_newbaseline
 	AD_RUN=watchful-dogfish
 	AD_TAG=all_trnval
+	AD_RUN=tourmaline-cassowary
+	AD_TAG=9more
 	EPOCH=148
 	BALL_CSV=/mnt/f/output/PyTrackNet/eval/muscular-whale_TrackJointTouch_v9_30_55/${MATCH}.csv
 	SKILL_WEIGHTS=/mnt/f/output/ActionDet/skill/${AD_RUN}_ActionEncoderV2_${AD_TAG}/${AD_TAG}_model_${EPOCH}.pt
@@ -211,7 +215,7 @@ do
 	popd
 
 	# Final heuristics run
-	TOUCH_CSV="/mnt/f/output/PyTrackNet/skill-eval/${AD_RUN}/${MATCH}/touch.csv"
+	TOUCH_CSV="/mnt/f/output/PyTrackNet/skill-eval/${AD_RUN}_${TAG}/${MATCH}/touch.csv"
 	VIZ_VID="/mnt/f/output/mmpose/v5_12k_frames/botsort_${MATCH}_hrnet_w48_coco_256x192.mp4"
 	VIZ_VID="/mnt/f/output/PyTrackNet/skill-eval/${AD_RUN}/${MATCH}/${MATCH}_${AD_RUN}.mp4"
 	VIZ_VID=/mnt/f/output/PyTrackNet/eval/muscular-whale_TrackJointTouch_v9_30_55/${MATCH}.mp4

@@ -201,7 +201,10 @@ def imageflow_demo(dataloader, predictor, current_time, args, result_filename, v
     timer = Timer()
 
     frame_id = 0
-    results = ['frame,id,x1,y1,w,h,play,class,is_jumping,ori_fnum,dx,dy,tlen\n']
+    results_wr = open(result_filename, 'w')
+    header = 'frame,id,x1,y1,w,h,play,class,is_jumping,ori_fnum,dx,dy,tlen\n'
+    results_wr.write(header)
+
     print_flag = True
     last_play = -1
     for frame_id, (vid_fnum, play_num, frame) in enumerate(dataloader):
@@ -260,7 +263,7 @@ def imageflow_demo(dataloader, predictor, current_time, args, result_filename, v
                     csv_str = (f'{vid_fnum},{tid},{tlwh[0]:.2f},{tlwh[1]:.2f},{tlwh[2]:.2f},'
                                f'{tlwh[3]:.2f},{play_num},{nearfar},{is_jumping},{vid_fnum},'
                                f'{dxdy[0]},{dxdy[1]},{tlen}\n')
-                    results.append(csv_str)
+                    results_wr.write(csv_str)
 
             timer.toc()
 
@@ -281,8 +284,6 @@ def imageflow_demo(dataloader, predictor, current_time, args, result_filename, v
 
         vid_writer.write(online_im)
 
-    with open(result_filename, 'w') as f:
-        f.writelines(results)
     logger.info(f"Saved tracking results to {result_filename}")
 
 

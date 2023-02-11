@@ -1,9 +1,7 @@
-# 20221215_texas_usd
-
 export PYTHONPATH=$PWD:${PWD}/../vball_tracking:../player_id:../vball-mmdet:${PWD}/../PyTrackNet:${PWD}/../ActionDet:${PWD}:../mmpose
 export CUDA_VISIBLE_DEVICES=0
 
-MATCH=20211002_olemiss_florida_short
+MATCH=20230126_rzk_bdk_1s
 GPU=0
 unset REID
 unset TRT
@@ -43,7 +41,7 @@ while getopts 'bg:m:rth' opt; do
 done
 shift "$(($OPTIND -1))"
 
-TAG=noDV
+TAG=stable-new-heur
 
 if [[ -v TRT ]];
 then
@@ -60,7 +58,7 @@ then
 else
     REID_ARGS="--no-reid"
 fi
-BALL_TAG=noDV-ball
+BALL_TAG=stable-new-heur
 
 if [[ $GPU == 1 ]];
 then
@@ -71,14 +69,20 @@ RAW_VID=/mnt/g/data/vball/matches/*/${MATCH}/end0.mp4
 BYTETRACK_CKPT=/mnt/f/output/ByteTrack/YOLOX_outputs/yolox_x_fullcourt_v5bytetrack-with-bad-touches/latest_ckpt.pth.tar
 BYTETRACK_CFG=../ByteTrack/exps/example/mot/yolox_x_fullcourt.py
 
-python tools/vb_demo.py --match-name $MATCH --view end0 --unsquashed --ckpt $BYTETRACK_CKPT -f $BYTETRACK_CFG --tag $TAG $TRT_OPTS $REID_ARGS&
+CMD="python tools/vb_demo_unsquashed.py --match-name $MATCH --view end0 --unsquashed --ckpt $BYTETRACK_CKPT -f $BYTETRACK_CFG --tag $TAG $TRT_OPTS $REID_ARGS --path /mnt/f/output/vid_frames/${MATCH}"
+echo $CMD
+$CMD&
+
 if [[ -v GEN_BALL ]];
 then
     python ../PyTrackNet/scripts/auto_label.py --load_weights /mnt/f/output/PyTrackNet/skill/muscular-whale_TrackJointTouch_v9_30_55/latest.pt --unsquashed --eval --eval-match $MATCH --tag $BALL_TAG&
     echo
 fi
+
 wait
+
 python ../vball_tracking/apply_heuristics.py --match-name $MATCH --tracking-csv /mnt/f/output/BotSort/${TAG}/yolox_x_fullcourt/${MATCH}/end0.csv --view end0 --tag $TAG --task just_tracks_unsquashed
+
 HEUR_CSV="/mnt/f/output/heuristics/${TAG}/${MATCH}/end0.csv"
 POSE_CFG=../mmpose/configs/body/2d_kpt_sview_rgb_img/topdown_heatmap/coco/hrnet_w48_coco_256x192.py
 POSE_CKPT=https://download.openmmlab.com/mmpose/top_down/hrnet/hrnet_w48_coco_256x192-b9e0b3ab_20200708.pth
@@ -101,4 +105,3 @@ ACT_CKPT=/mnt/f/output/ActionDet/skill/nonchalant-avocet_ActionEncoderV2_baselin
 
 python ../PyTrackNet/scripts/auto_label.py --unsquashed --temporal-eval --window-pad 2 --window-slide-div 1 --tag $TAG --eval-match ${MATCH} --pose-csv $POSE_CSV --ball-csv $BALL_CSV --action-weights $ACT_CKPT --load_weights /mnt/f/output/PyTrackNet/skill/muscular-whale_TrackJointTouch_v9_30_55/latest.pt --vid-fn $POSE_VID
 
-# python ../vball_tracking/apply_heuristics.py --match-name ${MATCH} --tracking-csv /mnt/f/output/BotSort/${TAG}/yolox_x_fullcourt/${MATCH}/end0.csv --view end0 --tag ${TAG} --jumping-posadj --assign-canonical --backproject --smooth-bev --task visualize --max-plays 3 --touch-csv /mnt/f/output/PyTrackNet/skill-eval/complex-cow/${MATCH}/touch.csv --show-bev-ball --ball-csv $BALL_CSV --id-players --viz-vid /mnt/f/output/PyTrackNet/eval/muscular-whale_TrackJointTouch_v9_30_55/${MATCH}.mp4 

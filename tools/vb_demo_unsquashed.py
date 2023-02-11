@@ -1,0 +1,495 @@
+import argparse
+import os
+import os.path as osp
+import time
+from collections import defaultdict
+
+import cv2
+import torch
+from torch.utils.data import Dataset
+import torchvision.transforms as transforms
+
+from PIL import Image
+
+from loguru import logger
+import numpy as np
+
+from yolox.data.data_augment import preproc
+from yolox.exp import get_exp
+from yolox.utils import fuse_model, get_model_info, postprocess, setup_logger
+from yolox.utils.visualize import plot_tracking_mc
+
+from tracker.vball_sort import VbSORT
+from tracker.tracking_utils.timer import Timer
+
+from vtrak.match_config import Match
+from vtrak.config import cfg
+from vtrak.court import BevCourt
+from vtrak.vball_misc import get_wh_ffprobe
+
+
+IMAGE_EXT = [".jpg", ".jpeg", ".webp", ".bmp", ".png"]
+RGB_MEANS = (0.485, 0.456, 0.406)
+RGB_STD = (0.229, 0.224, 0.225)
+
+
+def local_preproc(image):
+    swap = (2, 0, 1)
+    mean = RGB_MEANS
+    std = RGB_STD
+    input_size = exp.test_size
+    if len(image.shape) == 3:
+        padded_img = np.ones((input_size[0], input_size[1], 3)) * 114.0
+    else:
+        padded_img = np.ones(input_size) * 114.0
+
+    img = np.array(image)
+    r = min(input_size[0] / img.shape[0], input_size[1] / img.shape[1])
+    resized_img = cv2.resize(
+        img,
+        (int(img.shape[1] * r), int(img.shape[0] * r)),
+        interpolation=cv2.INTER_LINEAR,
+    ).astype(np.float32)
+    padded_img[: int(img.shape[0] * r), : int(img.shape[1] * r)] = resized_img
+
+    padded_img = padded_img[:, :, ::-1]
+    padded_img /= 255.0
+    if mean is not None:
+        padded_img -= mean
+    if std is not None:
+        padded_img /= std
+    padded_img = padded_img.transpose(swap)
+    padded_img = np.ascontiguousarray(padded_img, dtype=np.float32)
+    return padded_img
+
+
+class VidFrameLoader(Dataset):
+    """
+    Just load images from a video. Can define a subset of frames or a max
+    number of frames.
+    """
+    def __init__(self, root,
+                 transforms=None,
+                 ext='.jpg'):
+        """
+        inputs:
+           path     - path to images
+           tgt_size - (w,h) the size of image
+        """
+        self.root = root
+        imgs = os.listdir(root)
+        imgs.sort()
+        self.imgs = [img for img in imgs if ext in img]
+        print(f'Found {len(self.imgs)} images in {root}')
+        self.transforms = transforms
+
+    def __len__(self):
+        return len(self.imgs)
+
+    def __new_getitem__(self, index):
+        img_fn = osp.join(self.root, self.imgs[index])
+        pil_img = Image.open(img_fn).convert('RGB')
+
+        if self.transforms is not None:
+            img = self.transforms(pil_img)
+
+        cv2_img = cv2.cvtColor(np.array(pil_img), cv2.COLOR_RGB2BGR)
+        output = {
+            'img': img,
+            'cv2_img': cv2_img
+        }
+        return output
+
+    def __getitem__(self, index):
+        img_fn = osp.join(self.root, self.imgs[index])
+        cv2_img = cv2.imread(img_fn)
+        img = local_preproc(cv2_img)
+        output = {
+            'img': img,
+            'cv2_img': cv2_img,
+            'img_fn': img_fn,
+        }
+        return output
+
+
+def make_parser():
+    parser = argparse.ArgumentParser("BoT-SORT Demo!")
+    parser.add_argument("-expn", "--experiment-name", type=str, default=None)
+    parser.add_argument("-n", "--name", type=str, default=None, help="model name")
+    parser.add_argument("--path", default="", help="path to images or video")
+    parser.add_argument("--camid", type=int, default=0, help="webcam demo camera id")
+    parser.add_argument("-f", "--exp_file", default=None, type=str, help="pls input your expriment description file")
+    parser.add_argument("-c", "--ckpt", default=None, type=str, help="ckpt for eval")
+    parser.add_argument("--device", default="gpu", type=str, help="device to run our model, can either be cpu or gpu")
+    parser.add_argument("--conf", default=None, type=float, help="test conf")
+    parser.add_argument("--nms", default=0.65, type=float, help="test nms threshold")
+    parser.add_argument("--tsize", default=None, type=str, help="test img size (w,h)")
+    parser.add_argument("--fps", default=30, type=int, help="frame rate (fps)")
+    parser.add_argument("--fp16", dest="fp16", default=False, action="store_true",help="Adopting mix precision evaluating.")
+    parser.add_argument("--fuse", dest="fuse", default=False, action="store_true", help="Fuse conv and bn for testing.")
+    parser.add_argument("--trt", dest="trt", default=False, action="store_true", help="Using TensorRT model for testing.")
+
+    # tracking args
+    parser.add_argument("--track_high_thresh", type=float, default=0.5, help="tracking confidence threshold")
+    parser.add_argument("--track_low_thresh", default=0.1, type=float, help="lowest detection threshold")
+    parser.add_argument("--new_track_thresh", default=0.6, type=float, help="new track thresh")
+    parser.add_argument("--track_buffer", type=int, default=30, help="the frames for keep lost tracks")
+    parser.add_argument("--match_thresh", type=float, default=0.8, help="matching threshold for tracking")
+    parser.add_argument('--min_box_area', type=float, default=10, help='filter out tiny boxes')
+    parser.add_argument("--fuse-score", dest="fuse_score", default=False, action="store_true", help="fuse score and iou for association")
+
+    # CMC
+    parser.add_argument("--cmc-method", default="none", type=str,
+                        help=("cmc method: files (Vidstab GMC) | orb | ecc"
+                              "But we shouldn't need CMC with vb, so defaulting to off"))
+    # ReID
+    # parser.add_argument("--with-reid", dest="with_reid", default=True, action="store_true", help="use reid model")
+    parser.add_argument("--no-reid", dest="with_reid", default=True, action='store_false', help="don't use reid model")
+    parser.add_argument("--fast-reid-config", dest="fast_reid_config", default=r"fast_reid/configs/MOT17/sbs_S50.yml", type=str, help="reid config file path")
+    parser.add_argument("--fast-reid-weights", dest="fast_reid_weights", default=r"pretrained/mot17_sbs_S50.pth", type=str,help="reid config file path")
+    parser.add_argument('--proximity_thresh', type=float, default=0.5, help='threshold for rejecting low overlap reid matches')
+    parser.add_argument('--appearance_thresh', type=float, default=0.25, help='threshold for rejecting low appearance similarity reid matches')
+
+    parser.add_argument(
+        "--unsquashed", action='store_true'
+    )
+    parser.add_argument(
+        "--play-vid", default=None, help="name of a single video to evaluate"
+    )
+    parser.add_argument(
+        "--match-name", default=None, help="match name"
+    )
+    parser.add_argument(
+        "--view", default=None, help="view"
+    )
+    parser.add_argument(
+        "--tag", default=None, help="tag outputdir"
+    )
+    parser.add_argument(
+        "--max-plays", default=None, type=int, help="max plays"
+    )
+    parser.add_argument(
+        "--max-frames", default=None, type=int, help="max frames"
+    )
+    parser.add_argument(
+        "--start-pad", type=int, default=2,
+    )
+    parser.add_argument(
+        "--end-pad", type=int, default=2,
+    )
+    return parser
+
+
+def get_image_list(path):
+    image_names = []
+    for maindir, subdir, file_name_list in os.walk(path):
+        for filename in file_name_list:
+            apath = osp.join(maindir, filename)
+            ext = osp.splitext(apath)[1]
+            if ext in IMAGE_EXT:
+                image_names.append(apath)
+    return image_names
+
+
+def write_results(filename, results):
+    save_format = '{frame},{id},{x1},{y1},{w},{h},{s},-1,-1,-1\n'
+    with open(filename, 'w') as f:
+        for frame_id, tlwhs, track_ids, scores in results:
+            for tlwh, track_id, score in zip(tlwhs, track_ids, scores):
+                if track_id < 0:
+                    continue
+                x1, y1, w, h = tlwh
+                line = save_format.format(frame=frame_id, id=track_id, x1=round(x1, 1), y1=round(y1, 1), w=round(w, 1), h=round(h, 1), s=round(score, 2))
+                f.write(line)
+    logger.info('save results to {}'.format(filename))
+
+
+class Predictor(object):
+    def __init__(
+        self,
+        model,
+        exp,
+        trt_file=None,
+        decoder=None,
+        device=torch.device("cpu"),
+        fp16=False
+    ):
+        self.model = model
+        self.decoder = decoder
+        self.num_classes = exp.num_classes
+        self.confthre = exp.test_conf
+        self.nmsthre = exp.nmsthre
+        self.test_size = exp.test_size
+        print(f'BotSORT preproc test size {self.test_size}')
+        print(f'BotSORT postproc conf_thresh {self.confthre}, nms thresh {self.nmsthre}')
+        self.device = device
+        self.fp16 = fp16
+        self.trt = trt_file is not None
+        if trt_file is not None:
+            from torch2trt import TRTModule
+
+            model_trt = TRTModule()
+            model_trt.load_state_dict(torch.load(trt_file))
+
+            x = torch.ones((1, 3, exp.test_size[0], exp.test_size[1]), device=device)
+            if self.fp16:
+                x = x.half()
+            self.model(x)
+            self.model = model_trt
+        self.rgb_means = RGB_MEANS
+        self.std = RGB_STD
+
+    def inference(self, img, raw_img, timer, dump_input=False):
+        img_info = {"id": 0}
+        img_info["file_name"] = None
+        img = img.unsqueeze(0).float().to(self.device)
+
+        height, width = raw_img.shape[:2]
+        img_info["height"] = height
+        img_info["width"] = width
+        img_info["raw_img"] = raw_img
+
+        img = img.to(self.device)
+        if self.fp16 and not self.trt:
+            img = img.half()  # to FP16
+
+        with torch.no_grad():
+            timer.tic()
+            if dump_input:
+                np.save(f'inp_{dump_input}.npy', img.cpu())
+            outputs = self.model(img)
+            if self.decoder is not None:
+                outputs = self.decoder(outputs, dtype=outputs.type())
+            if dump_input:
+                np.save(f'oup_{dump_input}.npy', outputs.cpu())
+                import pdb; pdb.set_trace()
+            outputs = postprocess(outputs, self.num_classes, self.confthre, self.nmsthre)
+        return outputs, img_info
+
+
+def imageflow_demo(dataloader, predictor, current_time, args, result_filename, vid_writer,
+                   court):
+    tracker = VbSORT(args, frame_rate=args.fps)
+
+    # ----- class name to class id and class id to class name
+    id2cls = defaultdict(str)
+    cls2id = defaultdict(int)
+    for cls_id, cls_name in enumerate(tracker.class_names):
+        id2cls[cls_id] = cls_name
+        cls2id[cls_name] = cls_id
+
+    timer = Timer()
+    start_time = time.time()
+
+    frame_id = 0
+    results_wr = open(result_filename, 'w')
+    header = 'frame,id,x1,y1,w,h,play,class,is_jumping,ori_fnum,dx,dy,tlen\n'
+    results_wr.write(header)
+
+    print_flag = True
+    last_play = -1
+    for frame_id, data in enumerate(dataloader):
+
+        # Batch size 1
+        img = data['img'][0]
+        raw_img = data['cv2_img'][0].numpy()
+
+        vid_fnum = frame_id + 1
+        play_num = 0
+        if play_num != last_play:
+            logger.info(f'Start play {play_num} frame {vid_fnum}')
+        last_play = play_num
+        if frame_id % 100 == 0:
+            cur_time = time.time()
+            fps = frame_id / (cur_time - start_time)
+            logger.info('Processing play {} frame {} ({:.2f} fps)'.format(
+                play_num, vid_fnum, fps))
+
+        if frame_id == 0:
+            video_frame_fn = result_filename.replace('csv', 'png')
+            cv2.imwrite(video_frame_fn, raw_img)
+
+        # Run tracker
+        frame_print = None
+
+        # Detect objects
+        outputs, img_info = predictor.inference(img, raw_img, timer, dump_input=frame_print)
+        dets = outputs[0]
+        scale = min(exp.test_size[0] / float(img_info['height']),
+                    exp.test_size[1] / float(img_info['width']))
+
+        if print_flag:
+            w, h = img_info['width'], img_info['height']
+            print(f'img_size w,h = {w},{h}, scale={scale:2.4f}')
+            print_flag = False
+
+        if dets is not None:
+            # scale bbox predictions according to image size
+            outputs = outputs[0].cpu().numpy()
+            detections = outputs[:, :7]
+            detections[:, :4] /= scale
+            online_targets = tracker.update(detections, img_info["raw_img"],
+                                            frame_print=frame_print)
+
+            online_tlwhs = []
+            online_ids = []
+            online_scores = []
+            online_jumping = []
+            online_nearfar = []
+            for trk in online_targets:
+                tlwh = trk.tlwh
+                tid = trk.track_id
+                tlwh = trk.tlwh
+                dxdy = trk.dxdy
+                tlen = trk.tracklet_len
+                nearfar = trk.cls
+                is_jumping = trk.jumping
+                if tlwh[2] * tlwh[3] > args.min_box_area:
+                    online_tlwhs.append(tlwh)
+                    online_ids.append(tid)
+                    online_scores.append(trk.score)
+                    online_jumping.append(is_jumping)
+                    online_nearfar.append(nearfar)
+                    csv_str = (f'{vid_fnum},{tid},{tlwh[0]:.2f},{tlwh[1]:.2f},{tlwh[2]:.2f},'
+                               f'{tlwh[3]:.2f},{play_num},{nearfar},{is_jumping},{vid_fnum},'
+                               f'{dxdy[0]},{dxdy[1]},{tlen}\n')
+                    results_wr.write(csv_str)
+
+            timer.toc()
+
+            online_im = plot_tracking_mc(
+                image=img_info['raw_img'],
+                tlwhs=online_tlwhs,
+                obj_ids=online_ids,
+                jumping=online_jumping,
+                nearfar=online_nearfar,
+                num_classes=tracker.num_classes,
+                frame_id=vid_fnum,
+                fps=1. / timer.average_time,
+                play_num=play_num,
+            )
+        else:
+            timer.toc()
+            online_im = img_info['raw_img']
+        vid_writer.write(online_im)
+
+    logger.info(f"Saved tracking results to {result_filename}")
+
+
+def setup_volleyvision(args):
+    if args.tag is not None:
+        result_root = osp.join(cfg.output_root, 'BotSort', args.tag, exp.exp_name, args.match_name)
+    else:
+        result_root = osp.join(cfg.output_root, 'BotSort', exp.exp_name, args.match_name)
+    os.makedirs(result_root, exist_ok=True)
+
+    setup_logger(result_root, filename="log.log")
+
+    if args.play_vid:
+        vid_basename = osp.splitext(osp.basename(args.play_vid))[0]
+        result_filename = os.path.join(result_root, f'{vid_basename}.csv')
+    else:
+        result_filename = os.path.join(result_root, f'{args.view}.csv')
+
+    print(f'Max plays {args.max_plays}')
+    print(f'Max frames {args.max_frames}')
+
+    if not args.experiment_name:
+        args.experiment_name = exp.exp_name
+
+    img_size = exp.test_size[1], exp.test_size[0]
+    print(f'Inference img_size {img_size}')
+
+    normalize = transforms.Normalize(mean=RGB_MEANS, std=RGB_STD)
+    img_transforms = transforms.Compose([
+        transforms.Resize(exp.test_size),
+        transforms.ToTensor(),
+        normalize,
+    ])
+    dataset = VidFrameLoader(args.path,
+                             transforms=img_transforms)
+    dataloader = torch.utils.data.DataLoader(
+        dataset, batch_size=1, shuffle=False,
+        num_workers=4, pin_memory=True)
+
+    output_video_path = osp.join(result_root, f'{args.view}.mp4')
+    mobj = Match(args.match_name,
+                 args.view,
+                 unsquashed=True)
+    # 1280, 720
+    wh = get_wh_ffprobe(mobj.vid_fn)
+    vid_writer = cv2.VideoWriter(
+        output_video_path, cv2.VideoWriter_fourcc(*"mp4v"),
+        mobj.fps, wh
+    )
+    court = BevCourt(args.match_name, args.view, result_root)
+    return result_root, result_filename, vid_writer, court, dataloader
+
+
+def main(exp, args):
+    result_root, result_filename, vid_writer, court, dataloader = setup_volleyvision(args)
+
+    if args.trt:
+        args.device = "gpu"
+    args.device = torch.device("cuda" if args.device == "gpu" else "cpu")
+
+    logger.info("Args: {}".format(args))
+
+    if args.conf is not None:
+        exp.test_conf = args.conf
+    if args.nms is not None:
+        exp.nmsthre = args.nms
+    if args.tsize is not None:
+        exp.test_size = [int(x) for x in args.tsize.split(',')]
+
+    model = exp.get_model().to(args.device)
+    logger.info("Model Summary: {}".format(get_model_info(model, exp.test_size)))
+    model.eval()
+
+    if not args.trt:
+        if args.ckpt is None:
+            ckpt_file = osp.join(result_root, "best_ckpt.pth.tar")
+        else:
+            ckpt_file = args.ckpt
+        logger.info("loading checkpoint")
+        ckpt = torch.load(ckpt_file, map_location="cpu")
+        # load the model state dict
+        model.load_state_dict(ckpt["model"])
+        logger.info("loaded checkpoint done.")
+
+    if args.fuse:
+        logger.info("\tFusing model...")
+        model = fuse_model(model)
+
+    if args.fp16:
+        model = model.half()  # to FP16
+
+    if args.trt:
+        assert not args.fuse, "TensorRT model is not support model fusing!"
+        model_dir = ('/mnt/f/output/ByteTrack/YOLOX_outputs/yolox_x_fullcourt_'
+                     'v5bytetrack-with-bad-touches-trt')
+        trt_file = osp.join(model_dir, "model_trt.pth")
+        assert osp.exists(
+            trt_file
+        ), f"TensorRT model {trt_file} is not found!\n Run python3 tools/trt.py first!"
+        model.head.decode_in_inference = False
+        decoder = model.head.decode_outputs
+        logger.info("Using TensorRT to inference")
+    else:
+        trt_file = None
+        decoder = None
+
+    predictor = Predictor(model, exp, trt_file, decoder, args.device, args.fp16)
+    current_time = time.localtime()
+    imageflow_demo(dataloader, predictor, current_time, args, result_filename,
+                   vid_writer, court)
+
+
+if __name__ == "__main__":
+    args = make_parser().parse_args()
+    exp = get_exp(args.exp_file, args.name)
+
+    args.ablation = False
+    args.mot20 = not args.fuse_score
+
+    main(exp, args)

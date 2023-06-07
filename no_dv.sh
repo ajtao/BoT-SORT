@@ -1,7 +1,7 @@
 export PYTHONPATH=$PWD:${PWD}/../vball_tracking:../player_id:../vball-mmdet:${PWD}/../PyTrackNet:${PWD}/../ActionDet:${PWD}:../mmpose
 export CUDA_VISIBLE_DEVICES=0
 
-MATCH=20230107_stanford_sfu_short
+MATCH=20230126_rzk_bdk_1s
 GPU=0
 unset REID
 unset TRT
@@ -58,6 +58,7 @@ then
 else
     REID_ARGS="--no-reid"
 fi
+
 BALL_TAG=fix-ball
 
 if [[ $GPU == 1 ]];
@@ -85,6 +86,7 @@ then
     echo $CMD
     $CMD&
 fi
+
 wait
 
 CMD="python ../vball_tracking/apply_heuristics.py --match-name $MATCH --tracking-csv /mnt/f/output/BotSort/${TAG}/yolox_x_fullcourt/${MATCH}/end0.csv --view end0 --tag $TAG --task just_tracks_unsquashed"
@@ -117,4 +119,3 @@ CMD="python ../PyTrackNet/scripts/auto_label.py --unsquashed --temporal-eval --w
 echo $CMD
 $CMD
 
-# python ../vball_tracking/apply_heuristics.py --match-name ${MATCH} --tracking-csv /mnt/f/output/BotSort/${TAG}/yolox_x_fullcourt/${MATCH}/end0.csv --view end0 --tag ${TAG} --jumping-posadj --assign-canonical --backproject --smooth-bev --task visualize --max-plays 3 --touch-csv /mnt/f/output/PyTrackNet/skill-eval/complex-cow/${MATCH}/touch.csv --show-bev-ball --ball-csv $BALL_CSV --id-players --viz-vid /mnt/f/output/PyTrackNet/eval/${PYTRACKNET_MODEL}/${MATCH}.mp4 

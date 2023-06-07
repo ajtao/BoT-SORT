@@ -55,7 +55,7 @@ def plot_tracking_mc(
         obj_ids,
         jumping,
         nearfar,
-        num_classes,
+        num_classes=None,
         scores=None,
         frame_id=0,
         fps=0.0,

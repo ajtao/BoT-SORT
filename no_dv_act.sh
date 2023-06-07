@@ -75,21 +75,22 @@ PYTRACKNET_MODEL=spiffy-shrew_TrackJointTouch_baseline
 
 export CUDA_VISIBLE_DEVICES=0
 CMD="python tools/vb_demo_unsquashed.py --match-name $MATCH --view end0 --unsquashed --ckpt $BYTETRACK_CKPT -f $BYTETRACK_CFG --tag $TAG $TRT_OPTS $REID_ARGS --path /mnt/f/output/vid_frames/${MATCH}"
-echo $CMD
-$CMD&
+#echo $CMD
+#$CMD&
 
 if [[ -v GEN_BALL ]];
 then
     export CUDA_VISIBLE_DEVICES=1
     CMD="python ../PyTrackNet/scripts/eval.py --task eval --load-weights /mnt/f/output/PyTrackNet/skill/${PYTRACKNET_MODEL}/latest.pt --match-dir $MATCH_DIR --tag $BALL_TAG --output-root /mnt/f/output"
     echo $CMD
-    $CMD&
+    exit
+    #$CMD&
 fi
 wait
 
 CMD="python ../vball_tracking/apply_heuristics.py --match-name $MATCH --tracking-csv /mnt/f/output/BotSort/${TAG}/yolox_x_fullcourt/${MATCH}/end0.csv --view end0 --tag $TAG --task just_tracks_unsquashed"
-echo $CMD
-$CMD
+#echo $CMD
+#$CMD
 
 HEUR_CSV="/mnt/f/output/heuristics/${TAG}/${MATCH}/end0.csv"
 POSE_CFG=../mmpose/configs/body/2d_kpt_sview_rgb_img/topdown_heatmap/coco/hrnet_w48_coco_256x192.py
@@ -97,10 +98,10 @@ POSE_CKPT=https://download.openmmlab.com/mmpose/top_down/hrnet/hrnet_w48_coco_25
 
 if [[ -v TRT ]];
 then
-    python ../mmpose/demo/top_down_video_demo_with_bot_trt.py $POSE_CFG --video-path $RAW_VID --output-root /mnt/f/output/mmpose/$TAG --tracking-csv $HEUR_CSV --match $MATCH --save-vid
+    #python ../mmpose/demo/top_down_video_demo_with_bot_trt.py $POSE_CFG --video-path $RAW_VID --output-root /mnt/f/output/mmpose/$TAG --tracking-csv $HEUR_CSV --match $MATCH --save-vid
     echo
 else
-    python ../mmpose/demo/top_down_video_demo_with_bot.py     $POSE_CFG $POSE_CKPT --video-path $RAW_VID --output-root /mnt/f/output/mmpose/$TAG --tracking-csv $HEUR_CSV --match $MATCH --save-vid
+    #python ../mmpose/demo/top_down_video_demo_with_bot.py     $POSE_CFG $POSE_CKPT --video-path $RAW_VID --output-root /mnt/f/output/mmpose/$TAG --tracking-csv $HEUR_CSV --match $MATCH --save-vid
     echo
 fi
 POSE_CSV=/mnt/f/output/mmpose/${TAG}/botsort_${MATCH}_hrnet_w48_coco_256x192.csv
@@ -113,8 +114,9 @@ ACT_CKPT=/mnt/f/output/ActionDet/skill/nonchalant-avocet_ActionEncoderV2_baselin
 # ACT_CKPT=/mnt/f/output/ActionDet/skill/glossy-armadillo_ActionEncoderV2_ball_dropout/ball_dropout_model_118.pt
 # ACT_CKPT=/mnt/f/output/ActionDet/skill/daft-tamarin_ActionEncoderV2_v3/v3_model_118.pt
 
+export CUDA_VISIBLE_DEVICES=0
 CMD="python ../PyTrackNet/scripts/auto_label.py --unsquashed --temporal-eval --window-pad 2 --window-slide-div 1 --tag $TAG --eval-match ${MATCH} --pose-csv $POSE_CSV --ball-csv $BALL_CSV --action-weights $ACT_CKPT --load_weights /mnt/f/output/PyTrackNet/skill/${PYTRACKNET_MODEL}/latest.pt --vid-fn $POSE_VID"
 echo $CMD
-$CMD
+# $CMD
 
 # python ../vball_tracking/apply_heuristics.py --match-name ${MATCH} --tracking-csv /mnt/f/output/BotSort/${TAG}/yolox_x_fullcourt/${MATCH}/end0.csv --view end0 --tag ${TAG} --jumping-posadj --assign-canonical --backproject --smooth-bev --task visualize --max-plays 3 --touch-csv /mnt/f/output/PyTrackNet/skill-eval/complex-cow/${MATCH}/touch.csv --show-bev-ball --ball-csv $BALL_CSV --id-players --viz-vid /mnt/f/output/PyTrackNet/eval/${PYTRACKNET_MODEL}/${MATCH}.mp4 

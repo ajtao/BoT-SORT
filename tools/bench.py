@@ -15,15 +15,15 @@ from yolox.exp import get_exp
 from yolox.utils import fuse_model, get_model_info, postprocess, setup_logger
 from yolox.utils.visualize import plot_tracking_mc
 
-from tracker.vball_sort import VbSORT
+from tracker.vball_sort import VbSORT, full_id_to_name
 from tracker.tracking_utils.timer import Timer
 
 from vtrak.match_config import Match
 from vtrak.config import cfg
 from vtrak.dataloader import LoadVideo
 from vtrak.court import BevCourt
-from vtrak.track_utils import TrackWriter
 
+# torch.backends.cuda.benchmark = True
 
 IMAGE_EXT = [".jpg", ".jpeg", ".webp", ".bmp", ".png"]
 
@@ -71,9 +71,6 @@ def make_parser():
     )
     parser.add_argument(
         "--play-vid", default=None, help="name of a single video to evaluate"
-    )
-    parser.add_argument(
-        "--dump-frames", action='store_true', help='dump out frames'
     )
     parser.add_argument(
         "--match-name", default=None, help="match name"
@@ -125,13 +122,14 @@ def write_results(filename, results):
 
 class Predictor(object):
     def __init__(
-        self,
-        model,
-        exp,
-        trt_file=None,
-        decoder=None,
-        device=torch.device("cpu"),
-        fp16=False
+            self,
+            model,
+            exp,
+            trt_file=None,
+            decoder=None,
+            device=torch.device("cpu"),
+            fp16=False,
+            BS=2
     ):
         self.model = model
         self.decoder = decoder
@@ -143,7 +141,6 @@ class Predictor(object):
         print(f'BotSORT postproc conf_thresh {self.confthre}, nms thresh {self.nmsthre}')
         self.device = device
         self.fp16 = fp16
-        self.trt = trt_file is not None
         if trt_file is not None:
             from torch2trt import TRTModule
 
@@ -151,12 +148,15 @@ class Predictor(object):
             model_trt.load_state_dict(torch.load(trt_file))
 
             x = torch.ones((1, 3, exp.test_size[0], exp.test_size[1]), device=device)
-            if self.fp16:
+            if args.fp16:
                 x = x.half()
             self.model(x)
             self.model = model_trt
         self.rgb_means = (0.485, 0.456, 0.406)
         self.std = (0.229, 0.224, 0.225)
+        self.BS = BS
+        self.last_outputs = None
+        self.null_model = True
 
     def inference(self, img, timer, dump_input=False):
         img_info = {"id": 0}
@@ -173,26 +173,35 @@ class Predictor(object):
 
         img, ratio = preproc(img, self.test_size, self.rgb_means, self.std)
         img_info["ratio"] = ratio
+
+        # batch size
         img = torch.from_numpy(img).unsqueeze(0).float().to(self.device)
-        if self.fp16 and not self.trt:
+        img = img.repeat(self.BS, 1, 1, 1)
+
+        if self.fp16 and False:
             img = img.half()  # to FP16
 
         with torch.no_grad():
             timer.tic()
             if dump_input:
                 np.save(f'inp_{dump_input}.npy', img.cpu())
-            outputs = self.model(img)
+            if self.null_model and self.last_outputs is not None:
+                outputs = self.last_outputs
+                return outputs, img_info
+            else:
+                outputs = self.model(img)
             if self.decoder is not None:
                 outputs = self.decoder(outputs, dtype=outputs.type())
             if dump_input:
                 np.save(f'oup_{dump_input}.npy', outputs.cpu())
                 import pdb; pdb.set_trace()
             outputs = postprocess(outputs, self.num_classes, self.confthre, self.nmsthre)
+            self.last_outputs = outputs
         return outputs, img_info
 
 
-def imageflow_demo(dataloader, predictor, current_time, args, result_filename, result_root,
-                   vid_writer, court):
+def imageflow_demo(dataloader, predictor, current_time, args, result_filename, vid_writer,
+                   court):
     tracker = VbSORT(args, frame_rate=args.fps)
 
     # ----- class name to class id and class id to class name
@@ -203,25 +212,18 @@ def imageflow_demo(dataloader, predictor, current_time, args, result_filename, r
         cls2id[cls_name] = cls_id
 
     timer = Timer()
-    start_time = time.time()
 
     frame_id = 0
-    results_wr = open(result_filename, 'w')
-    header = 'frame,id,x1,y1,w,h,play,class,is_jumping,ori_fnum,dx,dy,tlen\n'
-    results_wr.write(header)
-
+    results = ['frame,id,x1,y1,w,h,play,class,is_jumping,ori_fnum,dx,dy,tlen\n']
     print_flag = True
     last_play = -1
-
     for frame_id, (vid_fnum, play_num, frame) in enumerate(dataloader):
         if play_num != last_play:
             logger.info(f'Start play {play_num} frame {vid_fnum}')
         last_play = play_num
         if frame_id % 20 == 0:
-            cur_time = time.time()
-            fps = frame_id / (cur_time - start_time)
             logger.info('Processing play {} frame {} ({:.2f} fps)'.format(
-                play_num, vid_fnum, fps))
+                play_num, vid_fnum, 1. / max(1e-5, timer.average_time)))
 
         if frame_id == 0:
             video_frame_fn = result_filename.replace('csv', 'png')
@@ -257,118 +259,7 @@ def imageflow_demo(dataloader, predictor, current_time, args, result_filename, r
             for trk in online_targets:
                 tlwh = trk.tlwh
                 tid = trk.track_id
-                dxdy = trk.dxdy
-                tlen = trk.tracklet_len
-                nearfar = trk.cls
-                is_jumping = trk.jumping
-                if tlwh[2] * tlwh[3] > args.min_box_area:
-                    online_tlwhs.append(tlwh)
-                    online_ids.append(tid)
-                    online_scores.append(trk.score)
-                    online_jumping.append(is_jumping)
-                    online_nearfar.append(nearfar)
-                    csv_str = (f'{vid_fnum},{tid},{tlwh[0]:.2f},{tlwh[1]:.2f},{tlwh[2]:.2f},'
-                               f'{tlwh[3]:.2f},{play_num},{nearfar},{is_jumping},{vid_fnum},'
-                               f'{dxdy[0]},{dxdy[1]},{tlen}\n')
-                    results_wr.write(csv_str)
-
-            timer.toc()
-            online_im = plot_tracking_mc(
-                image=img_info['raw_img'],
-                tlwhs=online_tlwhs,
-                obj_ids=online_ids,
-                jumping=online_jumping,
-                nearfar=online_nearfar,
-                num_classes=tracker.num_classes,
-                frame_id=vid_fnum,
-                fps=1. / timer.average_time,
-                play_num=play_num,
-            )
-        else:
-            timer.toc()
-            online_im = img_info['raw_img']
-
-        vid_writer.write(online_im)
-
-    logger.info(f"Saved tracking results to {result_filename}")
-
-
-def track_plays(dataloader, predictor, current_time, args, result_filename, result_root,
-                vid_writer, court):
-    """
-    Meant to be called upon the output directories of dump_plays.py
-    """
-
-    if args.dump_frames:
-        img_dir = osp.join(result_root, 'images')
-        os.makedirs(img_dir, exist_ok=True)
-
-    tracker = VbSORT(args, frame_rate=args.fps)
-
-    # ----- class name to class id and class id to class name
-    id2cls = defaultdict(str)
-    cls2id = defaultdict(int)
-    for cls_id, cls_name in enumerate(tracker.class_names):
-        id2cls[cls_id] = cls_name
-        cls2id[cls_name] = cls_id
-
-    timer = Timer()
-    start_time = time.time()
-
-    frame_id = 0
-    results_wr = open(result_filename, 'w')
-    header = 'frame,id,x1,y1,w,h,play,class,is_jumping,ori_fnum,dx,dy,tlen\n'
-    results_wr.write(header)
-
-    print_flag = True
-    last_play = -1
-    trk_writer = TrackWriter(result_root)
-
-    for frame_id, (vid_fnum, play_num, frame) in enumerate(dataloader):
-        if play_num != last_play:
-            logger.info(f'Start play {play_num} frame {vid_fnum}')
-        last_play = play_num
-        if frame_id % 20 == 0:
-            cur_time = time.time()
-            fps = frame_id / (cur_time - start_time)
-            logger.info('Processing play {} frame {} ({:.2f} fps)'.format(
-                play_num, vid_fnum, fps))
-
-        if frame_id == 0:
-            video_frame_fn = result_filename.replace('csv', 'png')
-            cv2.imwrite(video_frame_fn, frame)
-
-        # Run tracker
-        frame_print = None
-
-        # Detect objects
-        outputs, img_info = predictor.inference(frame, timer, dump_input=frame_print)
-        dets = outputs[0]
-        scale = min(exp.test_size[0] / float(img_info['height']),
-                    exp.test_size[1] / float(img_info['width']))
-
-        if print_flag:
-            w, h = img_info['width'], img_info['height']
-            print(f'img_size w,h = {w},{h}, scale={scale:2.4f}')
-            print_flag = False
-
-        if dets is not None:
-            # scale bbox predictions according to image size
-            outputs = outputs[0].cpu().numpy()
-            detections = outputs[:, :7]
-            detections[:, :4] /= scale
-            online_targets = tracker.update(detections, img_info["raw_img"],
-                                            frame_print=frame_print)
-
-            online_tlwhs = []
-            online_ids = []
-            online_scores = []
-            online_jumping = []
-            online_nearfar = []
-            for trk in online_targets:
-                trk_writer.write(trk, vid_fnum)
                 tlwh = trk.tlwh
-                tid = trk.track_id
                 dxdy = trk.dxdy
                 tlen = trk.tracklet_len
                 nearfar = trk.cls
@@ -382,9 +273,11 @@ def track_plays(dataloader, predictor, current_time, args, result_filename, resu
                     csv_str = (f'{vid_fnum},{tid},{tlwh[0]:.2f},{tlwh[1]:.2f},{tlwh[2]:.2f},'
                                f'{tlwh[3]:.2f},{play_num},{nearfar},{is_jumping},{vid_fnum},'
                                f'{dxdy[0]},{dxdy[1]},{tlen}\n')
-                    results_wr.write(csv_str)
+                    results.append(csv_str)
 
             timer.toc()
+
+            """
             online_im = plot_tracking_mc(
                 image=img_info['raw_img'],
                 tlwhs=online_tlwhs,
@@ -396,21 +289,22 @@ def track_plays(dataloader, predictor, current_time, args, result_filename, resu
                 fps=1. / timer.average_time,
                 play_num=play_num,
             )
+            """
         else:
             timer.toc()
             online_im = img_info['raw_img']
 
-        vid_writer.write(online_im)
+        # vid_writer.write(online_im)
 
-        if args.dump_frames:
-            img_fn = osp.join(img_dir, f'{vid_fnum:06d}.jpg')
-            cv2.imwrite(img_fn, img_info['raw_img'])
-
-    trk_writer.finish()
+    with open(result_filename, 'w') as f:
+        f.writelines(results)
     logger.info(f"Saved tracking results to {result_filename}")
 
 
 def setup_volleyvision(args):
+    if args.unsquashed:
+        cfg.match_root = '/mnt/g/data/vball/matches'
+
     if args.tag is not None:
         result_root = osp.join(cfg.output_root, 'BotSort', args.tag, exp.exp_name, args.match_name)
     else:
@@ -435,9 +329,6 @@ def setup_volleyvision(args):
         img_size = [int(x) for x in args.tsize.split(',')]
     else:
         img_size = None
-
-    print(f'Inference img_size {img_size}')
-
     if args.play_vid:
         dataloader = LoadVideo(args.play_vid, img_size)
     else:
@@ -445,14 +336,12 @@ def setup_volleyvision(args):
                      args.view,
                      args.max_plays,
                      use_offset=False,
-                     unsquashed=args.unsquashed,
                      start_pad=args.start_pad,
                      end_pad=args.end_pad)
         try:
             pass
         except:
-            print(f'ERROR: some problem reading in match {args.match_name} '
-                  '... SKIPPING')
+            print(f'ERROR: some problem reading in match {args.match_name} ... SKIPPING')
             raise
 
         dataloader = LoadVideo(mobj.vid_fn,
@@ -509,13 +398,10 @@ def main(exp, args):
 
     if args.trt:
         assert not args.fuse, "TensorRT model is not support model fusing!"
-        model_dir = ('/mnt/f/output/ByteTrack/YOLOX_outputs/yolox_x_fullcourt_'
-                     'v5bytetrack-with-bad-touches-trt')
-        model_dir = '/mnt/f/output/ByteTrack/YOLOX_outputs/dbg-trt_bs1'
-        trt_file = osp.join(model_dir, "model_trt.pth")
+        trt_file = osp.join('/mnt/f/output/ByteTrack/YOLOX_outputs/yolox_x_fullcourt_v5bytetrack-with-bad-touches-trt_bs2', "model_trt.pth")
         assert osp.exists(
             trt_file
-        ), f"TensorRT model {trt_file} is not found!\n Run python3 tools/trt.py first!"
+        ), "TensorRT model is not found!\n Run python3 tools/trt.py first!"
         model.head.decode_in_inference = False
         decoder = model.head.decode_outputs
         logger.info("Using TensorRT to inference")
@@ -525,9 +411,8 @@ def main(exp, args):
 
     predictor = Predictor(model, exp, trt_file, decoder, args.device, args.fp16)
     current_time = time.localtime()
-
     imageflow_demo(dataloader, predictor, current_time, args, result_filename,
-                   result_root, vid_writer, court)
+                   vid_writer, court)
 
 
 if __name__ == "__main__":

@@ -1,9 +1,10 @@
-import sys
+from easydict import EasyDict
 import argparse
 import os
 import os.path as osp
 import time
 from collections import defaultdict
+from tqdm import tqdm
 
 import cv2
 import torch
@@ -16,6 +17,7 @@ from yolox.exp import get_exp
 from yolox.utils import fuse_model, get_model_info, postprocess, setup_logger
 from yolox.utils.visualize import plot_tracking_mc
 
+from tracker.conf_sort import ConfSORT
 from tracker.vball_sort import VbSORT
 from tracker.tracking_utils.timer import Timer
 
@@ -23,6 +25,9 @@ from vtrak.match_config import Match
 from vtrak.config import cfg
 from vtrak.dataloader import LoadVideo
 from vtrak.track_utils import TrackWriter
+
+from scipy.spatial.distance import cdist
+from tracker import matching
 
 
 IMAGE_EXT = [".jpg", ".jpeg", ".webp", ".bmp", ".png"]
@@ -52,8 +57,10 @@ def make_parser():
     parser.add_argument("--new_track_thresh", default=0.6, type=float, help="new track thresh")
     parser.add_argument("--track_buffer", type=int, default=30, help="the frames for keep lost tracks")
     parser.add_argument("--match_thresh", type=float, default=0.8, help="matching threshold for tracking")
+    parser.add_argument("--conf_thresh", type=float, default=0.6, help="detection is confused if multiple tracks match with this IOU")
     parser.add_argument('--min_box_area', type=float, default=10, help='filter out tiny boxes')
     parser.add_argument("--fuse-score", dest="fuse_score", default=False, action="store_true", help="fuse score and iou for association")
+    parser.add_argument("--split-on-confusion", action='store_true')
 
     # CMC
     parser.add_argument("--cmc-method", default="none", type=str,
@@ -66,7 +73,6 @@ def make_parser():
     parser.add_argument("--fast-reid-weights", dest="fast_reid_weights", default=r"pretrained/mot17_sbs_S50.pth", type=str,help="reid config file path")
     parser.add_argument('--proximity_thresh', type=float, default=0.5, help='threshold for rejecting low overlap reid matches')
     parser.add_argument('--appearance_thresh', type=float, default=0.25, help='threshold for rejecting low appearance similarity reid matches')
-    parser.add_argument('--detect-confusions', action='store_true')
 
     parser.add_argument(
         "--play-vid", required=True, default=None,
@@ -78,84 +84,79 @@ def make_parser():
     return parser
 
 
-def track_play(dataloader, predictor, current_time, args, result_filename, result_root,
-               vid_writer):
-    """
-    Meant to be called upon a single play to write tracking information for.
-    Writes out CVAT-compatible tracking information, dumps frames.
-    """
-
-    img_dir = osp.join(result_root, 'images')
-    os.makedirs(img_dir, exist_ok=True)
-    tracker = VbSORT(args, frame_rate=args.fps)
-
-    # ----- class name to class id and class id to class name
-    id2cls = defaultdict(str)
-    cls2id = defaultdict(int)
-    for cls_id, cls_name in enumerate(tracker.class_names):
-        id2cls[cls_id] = cls_name
-        cls2id[cls_name] = cls_id
-
+def run_detector(dataloader, predictor):
     timer = Timer()
-    start_time = time.time()
 
-    frame_id = 0
-    results_wr = open(result_filename, 'w')
-    dets_wr = open(osp.join(result_root, 'dets.csv'), 'w')
-    header = 'frame,id,x1,y1,w,h,play,class,is_jumping,ori_fnum,dx,dy,tlen\n'
-    results_wr.write(header)
+    # results_wr = open(result_filename, 'w')
+    # dets_wr = open(osp.join(result_root, 'dets.csv'), 'w')
+    # header = 'frame,id,x1,y1,w,h,play,class,is_jumping,ori_fnum,dx,dy,tlen\n'
+    # results_wr.write(header)
+    frame_detections = {}
 
-    print_flag = True
-    last_play = -1
-    trk_writer = TrackWriter(result_root)
-
-    for frame_id, (vid_fnum, play_num, frame) in enumerate(dataloader):
-        if play_num != last_play:
-            logger.info(f'Start play {play_num} frame {vid_fnum}')
-        last_play = play_num
-        if frame_id % 20 == 0:
-            cur_time = time.time()
-            fps = frame_id / (cur_time - start_time)
-            logger.info('Processing play {} frame {} ({:.2f} fps)'.format(
-                play_num, vid_fnum, fps))
-
-        if frame_id == 0:
-            video_frame_fn = result_filename.replace('csv', 'png')
-            cv2.imwrite(video_frame_fn, frame)
-
-        # Run tracker
-        frame_print = None
-
+    for vid_fnum, play_num, frame in tqdm(dataloader, desc='run detector'):
         # Detect objects
-        outputs, img_info = predictor.inference(frame, timer, dump_input=frame_print)
+        outputs, img_info = predictor.inference(frame, timer)
         dets = outputs[0]
         scale = min(exp.test_size[0] / float(img_info['height']),
                     exp.test_size[1] / float(img_info['width']))
-
-        if print_flag:
-            w, h = img_info['width'], img_info['height']
-            print(f'img_size w,h = {w},{h}, scale={scale:2.4f}')
-            print_flag = False
 
         if dets is not None:
             # scale bbox predictions according to image size
             outputs = outputs[0].cpu().numpy()
             detections = outputs[:, :7]
             detections[:, :4] /= scale
-            online_targets = tracker.update(detections, img_info["raw_img"],
-                                            frame_print=frame_print)
+            frame_detections[vid_fnum] = detections, frame
+            # header = 'frame,id,x1,y1,w,h,play,class,is_jumping,ori_fnum,dx,dy,tlen\n'
+        else:
+            frame_detections[vid_fnum] = None, frame
 
+    return frame_detections
+
+
+def run_tracker(detections, vid_writer, args):
+    # detection is a dict[fnum] -> [dets]
+    tracker = ConfSORT(args, frame_rate=args.fps)
+    args.detect_confusions = True
+
+    # Run tracker once and capture events and tracks
+    tracks = defaultdict(dict)  # [tid][fnum]
+    events = []  # [list]
+    max_tid = -1
+    for fnum, (dets, img) in tqdm(detections.items(), desc='run tracker'):
+        if dets is not None:
+            # run tracker
+            online_targets, split_event = tracker.update(dets.copy(), img, fnum)
+
+            # record the track
+            for trk in online_targets:
+                simple_trk = EasyDict()
+                simple_trk.tlwh = trk.tlwh
+                simple_trk.track_id = trk.track_id
+                simple_trk.dxdy = trk.dxdy
+                simple_trk.tracklet_len = trk.tracklet_len
+                simple_trk.cls = trk.cls
+                simple_trk.nearfar = trk.cls
+                simple_trk.jumping = trk.jumping
+                simple_trk.score = trk.score
+                if fnum in trk.features:
+                    simple_trk.features = trk.features[fnum]
+                else:
+                    simple_trk.features = None
+                tracks[trk.track_id][fnum] = simple_trk
+                if trk.track_id > max_tid:
+                    max_tid = trk.track_id
+            if split_event is not None:
+                events.append(split_event)
+
+            # Visualize
             online_tlwhs = []
             online_ids = []
             online_scores = []
             online_jumping = []
             online_nearfar = []
             for trk in online_targets:
-                trk_writer.write(trk, vid_fnum)
                 tlwh = trk.tlwh
                 tid = trk.track_id
-                dxdy = trk.dxdy
-                tlen = trk.tracklet_len
                 nearfar = trk.cls
                 is_jumping = trk.jumping
                 if tlwh[2] * tlwh[3] > args.min_box_area:
@@ -164,124 +165,106 @@ def track_play(dataloader, predictor, current_time, args, result_filename, resul
                     online_scores.append(trk.score)
                     online_jumping.append(is_jumping)
                     online_nearfar.append(nearfar)
-                    csv_str = (f'{vid_fnum},{tid},{tlwh[0]:.2f},{tlwh[1]:.2f},{tlwh[2]:.2f},'
-                               f'{tlwh[3]:.2f},{play_num},{nearfar},{is_jumping},{vid_fnum},'
-                               f'{dxdy[0]},{dxdy[1]},{tlen}\n')
-                    results_wr.write(csv_str)
-                    dets_str = (f'{vid_fnum},-1,{tlwh[0]:.2f},{tlwh[1]:.2f},{tlwh[2]:.2f},'
-                                f'{tlwh[3]:.2f},{trk.score:0.2f},-1,-1\n')
-                    dets_wr.write(dets_str)
 
-            timer.toc()
             online_im = plot_tracking_mc(
-                image=img_info['raw_img'],
+                image=img,
                 tlwhs=online_tlwhs,
                 obj_ids=online_ids,
                 jumping=online_jumping,
                 nearfar=online_nearfar,
                 num_classes=tracker.num_classes,
-                frame_id=vid_fnum,
-                fps=1. / timer.average_time,
-                play_num=play_num,
+                frame_id=fnum,
+                fps=0,
+                play_num=0
             )
         else:
-            timer.toc()
-            online_im = img_info['raw_img']
+            online_im = img
 
         vid_writer.write(online_im)
 
-        img_fn = osp.join(img_dir, f'{vid_fnum:06d}.jpg')
-        cv2.imwrite(img_fn, img_info['raw_img'])
+    # Split and rename tracks
+    for event in events:
+        assert len(event) == 3
+        fnum_start, fnum_end, tids = event
+        print(f'\nEvent: fnum_start {fnum_start} fnum end {fnum_end} tids {tids}')
+        before_tracks = defaultdict(list)
+        after_tracks = defaultdict(list)
+        was_tid = {}  # table of what this tid used to be named
+        for tid in tids:
+            # new tid
+            max_tid += 1
+            new_tid = max_tid
 
-    trk_writer.finish()
-    logger.info(f"Saved tracking results to {result_filename}")
+            fnums = list(tracks[tid].keys())
+            if fnums[0] >= fnum_start:
+                was_tid[tid] = 'new'
+                print(f' new trk {tid}')
+            elif fnums[-1] <= fnum_end:
+                was_tid[tid] = 'ends'
+                print(f' {tid} ends')
+            else:
+                was_tid[new_tid] = tid
+                print(f' {tid} splits into {new_tid}')
 
-
-def viz_dets(dataloader, predictor, current_time, args, result_root):
-    timer = Timer()
-    start_time = time.time()
-    frame_id = 0
-    print_flag = True
-    last_play = -1
-
-    output_video_path = osp.join(result_root, 'dets.mp4')
-    vid_writer = cv2.VideoWriter(
-        output_video_path, cv2.VideoWriter_fourcc(*"mp4v"),
-        dataloader.frame_rate, (dataloader.width, dataloader.height)
-    )
-
-    for frame_id, (vid_fnum, play_num, frame) in enumerate(dataloader):
-        if play_num != last_play:
-            logger.info(f'Start play {play_num} frame {vid_fnum}')
-        last_play = play_num
-        if frame_id % 20 == 0:
-            cur_time = time.time()
-            fps = frame_id / (cur_time - start_time)
-            logger.info('Processing play {} frame {} ({:.2f} fps)'.format(
-                play_num, vid_fnum, fps))
-
-        # Run tracker
-        frame_print = None
-
-        # Detect objects
-        outputs, img_info = predictor.inference(frame, timer, dump_input=frame_print)
-        dets = outputs[0]
-        scale = min(exp.test_size[0] / float(img_info['height']),
-                    exp.test_size[1] / float(img_info['width']))
-
-        if print_flag:
-            w, h = img_info['width'], img_info['height']
-            print(f'img_size w,h = {w},{h}, scale={scale:2.4f}')
-            print_flag = False
-
-        if dets is not None:
-            # scale bbox predictions according to image size
-            outputs = outputs[0].cpu().numpy()
-            detections = outputs[:, :7]
-            detections[:, :4] /= scale
-
-            if len(detections):
-                bboxes = detections[:, :4]  # [num_players, [x1,y1,x2,y2]]
-                scores = detections[:, 4]  # [num_players]
-                if detections.shape[1] == 6:
-                    classes = detections[:, 5]
-                elif detections.shape[1] == 7:
-                    scores2 = detections[:, 5]
-                    scores *= scores2
-                    classes = detections[:, 6]
+            for fnum, trk in tracks[tid].items():
+                if fnum < fnum_start:
+                    before_tracks[tid].append(trk)
+                elif fnum > fnum_end:
+                    if tid not in before_tracks:
+                        # don't rename track if there's no before track
+                        after_tracks[tid].append(trk)
+                    else:
+                        trk.track_id = new_tid
+                        after_tracks[new_tid].append(trk)
                 else:
-                    raise
+                    # Within the event period, we discard the tracks.
+                    # Eventually figure out how to reconnect these
+                    #
+                    # Should use discard_shortest() to throw away short bad tracks when
+                    # we have more than 12 detections
+                    #
+                    # Should we eventually linearly interpolate between start/end and
+                    # then find linear sum assignment best IOU for those detections?
+                    pass
 
-            online_tlwhs = []
-            online_ids = []
-            online_scores = []
-            online_jumping = []
-            online_nearfar = []
-            for pl_idx, (bbox, score, cls) in enumerate(zip(bboxes, scores, classes)):
-                tlwh = (bbox[0], bbox[1], bbox[2]-bbox[0], bbox[3]-bbox[1])
-                online_tlwhs.append(tlwh)
-                online_ids.append(pl_idx)
-                online_scores.append(score)
-                online_jumping.append(0)
-                online_nearfar.append(cls==0)
+        def calc_reid_tracklet(tracklet):
+            # tracklet = list of trk
+            feats = np.array([trk.features for trk in tracklet if trk.features is not None])
+            feats = np.average(feats, axis=0)
+            return feats
 
-            timer.toc()
-            online_im = plot_tracking_mc(
-                image=img_info['raw_img'],
-                tlwhs=online_tlwhs,
-                obj_ids=online_ids,
-                jumping=online_jumping,
-                nearfar=online_nearfar,
-                num_classes=0,
-                frame_id=vid_fnum,
-                fps=1. / timer.average_time,
-                play_num=play_num,
-            )
-        else:
-            timer.toc()
-            online_im = img_info['raw_img']
+        before_feats = [calc_reid_tracklet(trks) for trks in before_tracks.values()]
+        after_feats = [calc_reid_tracklet(trks) for trks in after_tracks.values()]
+        dists = embedding_distance(before_feats, after_feats)
+        matches, u_track, u_detection = matching.linear_assignment(dists, thresh=args.match_thresh)
+        print(f'matches\n{matches}')
+        print(f'dists\n{dists}')
 
-        vid_writer.write(online_im)
+        print('Connectivity after matching tracklets with reID:')
+        for match in matches:
+            idx_bef, idx_aft = match
+            tid_bef = list(tids)[idx_bef]
+            tid_aft = list(after_tracks.keys())[idx_aft]
+            tid_aft_was = was_tid[tid_aft]
+            print(f'  {tid_bef} connects to {tid_aft_was} [{tid_aft}]')
+
+
+def embedding_distance(before, after, metric='cosine'):
+    """
+    :param before: list[STrack]
+    :param detections: list[BaseTrack]
+    :param metric:
+    :return: cost_matrix np.ndarray
+    """
+
+    cost_matrix = np.zeros((len(before), len(after)), dtype=float)
+    if cost_matrix.size == 0:
+        return cost_matrix
+    after_features = np.asarray(after, dtype=float)
+    before_features = np.asarray(before, dtype=float)
+
+    cost_matrix = np.maximum(0.0, cdist(before_features, after_features, metric))
+    return cost_matrix
 
 
 def setup_volleyvision(args):
@@ -374,12 +357,8 @@ def main(exp, args):
         decoder = None
 
     predictor = Predictor(model, exp, trt_file, decoder, args.device, args.fp16)
-    current_time = time.localtime()
-    if args.viz_dets:
-        viz_dets(dataloader, predictor, current_time, args, result_root)
-    else:
-        track_play(dataloader, predictor, current_time, args, result_filename,
-                   result_root, vid_writer)
+    detections = run_detector(dataloader, predictor)
+    run_tracker(detections, vid_writer, args)
 
 
 if __name__ == "__main__":

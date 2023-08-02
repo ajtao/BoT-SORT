@@ -72,6 +72,9 @@ def make_parser():
         "--unsquashed", action='store_true'
     )
     parser.add_argument(
+        "--no-dv", action='store_true'
+    )
+    parser.add_argument(
         "--play-vid", default=None, help="name of a single video to evaluate"
     )
     parser.add_argument(
@@ -245,7 +248,7 @@ def imageflow_demo(dataloader, predictor, current_time, args, result_filename, v
         if play_num != last_play:
             logger.info(f'Start play {play_num} frame {vid_fnum}')
         last_play = play_num
-        if frame_id % 20 == 0:
+        if frame_id % 100 == 0:
             cur_time = time.time()
             fps = frame_id / (cur_time - start_time)
             logger.info('Processing play {} frame {} ({:.2f} fps)'.format(
@@ -352,6 +355,7 @@ def setup_volleyvision(args):
                      args.max_plays,
                      use_offset=False,
                      unsquashed=args.unsquashed,
+                     no_dv=args.no_dv,
                      start_pad=args.start_pad,
                      end_pad=args.end_pad)
         try:
@@ -367,7 +371,7 @@ def setup_volleyvision(args):
 
     output_video_path = osp.join(result_root, f'{args.view}.mp4')
     vid_writer = cv2.VideoWriter(
-        output_video_path, cv2.VideoWriter_fourcc(*"mp4v"),
+        output_video_path, cv2.VideoWriter_fourcc(*"avc1"),
         dataloader.frame_rate, (dataloader.width, dataloader.height)
     )
     court = BevCourt(args.match_name, args.view, result_root)

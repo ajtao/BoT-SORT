@@ -29,7 +29,9 @@ def filter_box(output, scale_range):
     return output[keep]
 
 
-def postprocess(prediction, num_classes, conf_thre=0.7, nms_thre=0.45):
+def postprocess(prediction, num_classes, conf_thre=0.7, nms_thre=0.45,
+                agnostic=False):
+    """ agnostic = class agnostic NMS """
     box_corner = prediction.new(prediction.shape)
     box_corner[:, :, 0] = prediction[:, :, 0] - prediction[:, :, 2] / 2
     box_corner[:, :, 1] = prediction[:, :, 1] - prediction[:, :, 3] / 2
@@ -54,12 +56,21 @@ def postprocess(prediction, num_classes, conf_thre=0.7, nms_thre=0.45):
         if not detections.size(0):
             continue
 
+        if agnostic:
+            saved_classes = detections[:, 6]
+            classes = torch.zeros_like(saved_classes, device=saved_classes.get_device())
+        else:
+            classes = detections[:, 6]
+
         nms_out_index = torchvision.ops.batched_nms(
-            detections[:, :4],
-            detections[:, 4] * detections[:, 5],
-            detections[:, 6],
-            nms_thre,
+            detections[:, :4],                       # boxes
+            detections[:, 4] * detections[:, 5],     # scores
+            classes,
+            nms_thre,                                # iou_thresh
         )
+
+        if agnostic:
+            detections[:, 6] = saved_classes  # put real classes back
 
         detections = detections[nms_out_index]
 

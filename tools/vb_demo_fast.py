@@ -219,7 +219,7 @@ class Predictor(object):
             if dump_input:
                 np.save(f'oup_{dump_input}.npy', outputs.cpu())
                 import pdb; pdb.set_trace()
-            outputs = postprocess(outputs, self.num_classes, self.confthre, self.nmsthre)
+            outputs = postprocess(outputs, self.num_classes, self.confthre, self.nmsthre, agnostic=True)
         return outputs, img_info
 
 

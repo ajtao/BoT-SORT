@@ -5,7 +5,6 @@ from tracker import matching
 from tracker.gmc import GMC
 from tracker.basetrack import BaseTrack, TrackState
 from tracker.kalman_filter import KalmanFilter
-
 from fast_reid.fast_reid_interfece import FastReIDInterface
 
 
@@ -54,12 +53,12 @@ class STrack(BaseTrack):
 
         self.smooth_feat = None
         self.curr_feat = None
-        if feat is not None:
-            self.update_features(feat)
         self.features = deque([], maxlen=feat_history)
+        if feat is not None:
+            self.update_features(feat, frame_id=1)
         self.alpha = 0.9
 
-    def update_features(self, feat):
+    def update_features(self, feat, frame_id):
         feat /= np.linalg.norm(feat)
         self.curr_feat = feat
         if self.smooth_feat is None:
@@ -171,7 +170,7 @@ class STrack(BaseTrack):
 
         self.mean, self.covariance = self.kalman_filter.update(self.mean, self.covariance, self.tlwh_to_xywh(new_track.tlwh))
         if new_track.curr_feat is not None:
-            self.update_features(new_track.curr_feat)
+            self.update_features(new_track.curr_feat, frame_id)
         self.tracklet_len = 0
         self.state = TrackState.Tracked
         self.is_activated = True
@@ -199,7 +198,7 @@ class STrack(BaseTrack):
         self.mean, self.covariance = self.kalman_filter.update(self.mean, self.covariance, self.tlwh_to_xywh(new_tlwh))
 
         if new_track.curr_feat is not None:
-            self.update_features(new_track.curr_feat)
+            self.update_features(new_track.curr_feat, frame_id)
 
         self.state = TrackState.Tracked
         self.is_activated = True
@@ -285,7 +284,11 @@ class STrack(BaseTrack):
 
 
 class VbSORT(object):
-    def __init__(self, args, frame_rate=30):
+    def __init__(self,
+                 args,
+                 frame_rate=30
+                 ):
+        """ Customize for volleyball """
         global class_names
         self.class_names = class_names
         self.num_classes = len(class_names)
@@ -328,6 +331,9 @@ class VbSORT(object):
         refind_stracks = []
         lost_stracks = []
         removed_stracks = []
+
+        #if self.frame_id == 22:
+        #    breakpoint()
 
         if len(output_results):
             bboxes = output_results[:, :4]
@@ -387,7 +393,11 @@ class VbSORT(object):
         '''Extract embeddings '''
         # assert self.args.with_reid, f'VbSORT requires reid for now'
         if self.args.with_reid:
+            # img shape (1080, 1920, 3)
+            # dets shape (12, 4)
             features_keep = self.encoder.inference(img, dets)
+            # array([ 0.        , -0.00270844,  0.02822876, ...,  0.01452637,
+            #         0.00448227, -0.00962067])
 
         if len(dets) > 0:
             '''Detections'''
@@ -418,9 +428,9 @@ class VbSORT(object):
         STrack.multi_predict(strack_pool)
 
         # Fix camera motion
-        warp = self.gmc.apply(img, dets)
-        STrack.multi_gmc(strack_pool, warp)
-        STrack.multi_gmc(unconfirmed, warp)
+        #warp = self.gmc.apply(img, dets)
+        #STrack.multi_gmc(strack_pool, warp)
+        #STrack.multi_gmc(unconfirmed, warp)
 
         # Associate with high score detection boxes
         ious_dists = matching.iou_distance(strack_pool, detections)

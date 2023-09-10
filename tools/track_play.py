@@ -61,6 +61,7 @@ def make_parser():
                               "But we shouldn't need CMC with vb, so defaulting to off"))
     # ReID
     # parser.add_argument("--with-reid", dest="with_reid", default=True, action="store_true", help="use reid model")
+    parser.add_argument("--sports-reid", action='store_true')
     parser.add_argument("--no-reid", dest="with_reid", default=True, action='store_false', help="don't use reid model")
     parser.add_argument("--fast-reid-config", dest="fast_reid_config", default=r"fast_reid/configs/MOT17/sbs_S50.yml", type=str, help="reid config file path")
     parser.add_argument("--fast-reid-weights", dest="fast_reid_weights", default=r"pretrained/mot17_sbs_S50.pth", type=str,help="reid config file path")
@@ -78,12 +79,16 @@ def make_parser():
     return parser
 
 
-def track_play(dataloader, predictor, current_time, args, result_filename, result_root,
-               vid_writer):
+def track_play(dataloader, predictor, current_time, args, result_filename, result_root):
     """
     Meant to be called upon a single play to write tracking information for.
     Writes out CVAT-compatible tracking information, dumps frames.
     """
+    output_video_path = osp.join(result_root, 'tracked.mp4')
+    vid_writer = cv2.VideoWriter(
+        output_video_path, cv2.VideoWriter_fourcc(*"mp4v"),
+        dataloader.frame_rate, (dataloader.width, dataloader.height)
+    )
 
     img_dir = osp.join(result_root, 'images')
     os.makedirs(img_dir, exist_ok=True)
@@ -311,16 +316,11 @@ def setup_volleyvision(args):
     print(f'Inference img_size {img_size}')
 
     dataloader = LoadVideo(args.play_vid, img_size)
-    output_video_path = osp.join(result_root, 'tracked.mp4')
-    vid_writer = cv2.VideoWriter(
-        output_video_path, cv2.VideoWriter_fourcc(*"mp4v"),
-        dataloader.frame_rate, (dataloader.width, dataloader.height)
-    )
-    return result_root, result_filename, vid_writer, dataloader
+    return result_root, result_filename, dataloader
 
 
 def main(exp, args):
-    result_root, result_filename, vid_writer, dataloader = setup_volleyvision(args)
+    result_root, result_filename, dataloader = setup_volleyvision(args)
 
     if args.trt:
         args.device = "gpu"
@@ -379,7 +379,7 @@ def main(exp, args):
         viz_dets(dataloader, predictor, current_time, args, result_root)
     else:
         track_play(dataloader, predictor, current_time, args, result_filename,
-                   result_root, vid_writer)
+                   result_root)
 
 
 if __name__ == "__main__":

@@ -41,6 +41,7 @@ def make_parser():
     parser.add_argument("--nms", default=0.65, type=float, help="test nms threshold")
     parser.add_argument("--tsize", default=None, type=str, help="test img size (w,h)")
     parser.add_argument("--fps", default=30, type=int, help="frame rate (fps)")
+    parser.add_argument("--viz-dets", action='store_true', help='visualize detections')
     parser.add_argument("--fp16", dest="fp16", default=False, action="store_true",help="Adopting mix precision evaluating.")
     parser.add_argument("--fuse", dest="fuse", default=False, action="store_true", help="Fuse conv and bn for testing.")
     parser.add_argument("--trt", dest="trt", default=False, action="store_true", help="Using TensorRT model for testing.")
@@ -271,6 +272,114 @@ def imageflow_demo(dataloader, predictor, current_time, args, result_filename, r
                                f'{tlwh[3]:.2f},{play_num},{nearfar},{is_jumping},{vid_fnum},'
                                f'{dxdy[0]},{dxdy[1]},{tlen}\n')
                     results_wr.write(csv_str)
+
+            timer.toc()
+            online_im = plot_tracking_mc(
+                image=img_info['raw_img'],
+                tlwhs=online_tlwhs,
+                obj_ids=online_ids,
+                jumping=online_jumping,
+                nearfar=online_nearfar,
+                num_classes=tracker.num_classes,
+                frame_id=vid_fnum,
+                fps=1. / timer.average_time,
+                play_num=play_num,
+            )
+        else:
+            timer.toc()
+            online_im = img_info['raw_img']
+
+        vid_writer.write(online_im)
+
+    logger.info(f"Saved tracking results to {result_filename}")
+
+
+def viz_dets(dataloader, predictor, current_time, args, result_filename, result_root,
+             vid_writer, court):
+    tracker = VbSORT(args, frame_rate=args.fps)
+
+    # ----- class name to class id and class id to class name
+    id2cls = defaultdict(str)
+    cls2id = defaultdict(int)
+    for cls_id, cls_name in enumerate(tracker.class_names):
+        id2cls[cls_id] = cls_name
+        cls2id[cls_name] = cls_id
+
+    timer = Timer()
+    start_time = time.time()
+
+    frame_id = 0
+    results_wr = open(result_filename, 'w')
+    header = 'frame,id,x1,y1,w,h,play,class,is_jumping,ori_fnum,dx,dy,tlen\n'
+    results_wr.write(header)
+
+    print_flag = True
+    last_play = -1
+
+    for frame_id, (vid_fnum, play_num, frame) in enumerate(dataloader):
+        if play_num != last_play:
+            logger.info(f'Start play {play_num} frame {vid_fnum}')
+        last_play = play_num
+        if frame_id % 20 == 0:
+            cur_time = time.time()
+            fps = frame_id / (cur_time - start_time)
+            logger.info('Processing play {} frame {} ({:.2f} fps)'.format(
+                play_num, vid_fnum, fps))
+
+        if frame_id == 0:
+            video_frame_fn = result_filename.replace('csv', 'png')
+            cv2.imwrite(video_frame_fn, frame)
+
+        # Run tracker
+        frame_print = None
+
+        # Detect objects
+        outputs, img_info = predictor.inference(frame, timer, dump_input=frame_print)
+        dets = outputs[0]
+        scale = min(exp.test_size[0] / float(img_info['height']),
+                    exp.test_size[1] / float(img_info['width']))
+
+        if print_flag:
+            w, h = img_info['width'], img_info['height']
+            print(f'img_size w,h = {w},{h}, scale={scale:2.4f}')
+            print_flag = False
+
+        if dets is not None:
+            # scale bbox predictions according to image size
+            outputs = outputs[0].cpu().numpy()
+            detections = outputs[:, :7]
+            detections[:, :4] /= scale
+
+            if len(detections):
+                bboxes = detections[:, :4]
+                scores = detections[:, 4]
+                if detections.shape[1] == 6:
+                    full_classes = detections[:, 5]
+                elif detections.shape[1] == 7:
+                    scores2 = detections[:, 5]
+                    scores *= scores2
+                    full_classes = detections[:, 6]
+                else:
+                    raise
+
+            online_tlwhs = []
+            online_ids = []
+            online_scores = []
+            online_jumping = []
+            online_nearfar = []
+            for trk in online_targets:
+                tlwh = trk.tlwh
+                tid = trk.track_id
+                dxdy = trk.dxdy
+                tlen = trk.tracklet_len
+                nearfar = trk.cls
+                is_jumping = trk.jumping
+                if tlwh[2] * tlwh[3] > args.min_box_area:
+                    online_tlwhs.append(tlwh)
+                    online_ids.append(tid)
+                    online_scores.append(trk.score)
+                    online_jumping.append(is_jumping)
+                    online_nearfar.append(nearfar)
 
             timer.toc()
             online_im = plot_tracking_mc(
@@ -526,8 +635,12 @@ def main(exp, args):
     predictor = Predictor(model, exp, trt_file, decoder, args.device, args.fp16)
     current_time = time.localtime()
 
-    imageflow_demo(dataloader, predictor, current_time, args, result_filename,
-                   result_root, vid_writer, court)
+    if args.viz_dets:
+        viz_dets(dataloader, predictor, current_time, args, result_filename,
+                 result_root, vid_writer, court)
+    else:
+        imageflow_demo(dataloader, predictor, current_time, args, result_filename,
+                       result_root, vid_writer, court)
 
 
 if __name__ == "__main__":

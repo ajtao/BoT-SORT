@@ -83,6 +83,10 @@ class VidFrameLoader(Dataset):
         print(f'Found {len(self.imgs)} images in {root}')
         self.transforms = transforms
 
+        img_fn = osp.join(self.root, self.imgs[0])
+        an_img = cv2.imread(img_fn)
+        self.vid_h, self.vid_w = an_img.shape[:2]
+
     def __len__(self):
         return len(self.imgs)
 

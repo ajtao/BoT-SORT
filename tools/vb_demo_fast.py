@@ -4,6 +4,7 @@ import os.path as osp
 import time
 from collections import defaultdict
 
+import contextlib
 import cv2
 import torch
 import torch.nn as nn
@@ -12,6 +13,7 @@ import torch.nn.functional as F
 
 from loguru import logger
 import numpy as np
+import ffmpegcv
 
 # from yolox.data.data_augment import preproc
 from yolox.exp import get_exp
@@ -30,6 +32,16 @@ from vtrak.court import BevCourt
 IMAGE_EXT = [".jpg", ".jpeg", ".webp", ".bmp", ".png"]
 
 
+# context manager to help keep track of ranges of time, using NVTX
+@contextlib.contextmanager
+def nvtx_range(msg):
+    depth = torch.cuda.nvtx.range_push(msg)
+    try:
+        yield depth
+    finally:
+        torch.cuda.nvtx.range_pop()
+
+
 def make_parser():
     parser = argparse.ArgumentParser("BoT-SORT Demo!")
     parser.add_argument("-expn", "--experiment-name", type=str, default=None)
@@ -38,7 +50,7 @@ def make_parser():
     parser.add_argument("--camid", type=int, default=0, help="webcam demo camera id")
     parser.add_argument("-f", "--exp_file", default=None, type=str, help="pls input your expriment description file")
     parser.add_argument("-c", "--ckpt", default=None, type=str, help="ckpt for eval")
-    parser.add_argument("--device", default="gpu", type=str, help="device to run our model, can either be cpu or gpu")
+    parser.add_argument("--device", default="cuda", type=str, help="device to run our model, can either be cpu or gpu")
     parser.add_argument("--conf", default=None, type=float, help="test conf")
     parser.add_argument("--nms", default=0.65, type=float, help="test nms threshold")
     parser.add_argument("--tsize", default=None, type=str, help="test img size (w,h)")
@@ -75,7 +87,7 @@ def make_parser():
         "--no-dv", action='store_true'
     )
     parser.add_argument(
-        "--play-vid", default=None, help="name of a single video to evaluate"
+        "--play-vid", default=None, required=True, help="name of a single video to evaluate"
     )
     parser.add_argument(
         "--match-name", default=None, help="match name"
@@ -84,7 +96,7 @@ def make_parser():
         "--view", default=None, help="view"
     )
     parser.add_argument(
-        "--tag", default=None, help="tag outputdir"
+        "--outdir", default=None, required=True, help="output dir"
     )
     parser.add_argument(
         "--max-plays", default=None, type=int, help="max plays"
@@ -97,6 +109,9 @@ def make_parser():
     )
     parser.add_argument(
         "--end-pad", type=int, default=2,
+    )
+    parser.add_argument(
+        "--prof", action='store_true'
     )
     return parser
 
@@ -136,19 +151,23 @@ class ToTensor(nn.Module):
         self.resize = transforms.Resize(input_size, interpolation=transforms.InterpolationMode.BILINEAR)
 
     def forward(self, img):
-        x = self.to_tensor(img)
-        x = self.normalize(x)
-        x = self.resize(x)
+        with nvtx_range('totensor'):
+            x = self.to_tensor(img)
+        with nvtx_range('norm'):
+            x = self.normalize(x)
+        with nvtx_range('resize'):
+            x = self.resize(x)
         c, h, w = x.shape
 
-        if (h, w) == self.input_size:
-            padded = x
-        else:
-            padded = torch.zeros(self.input_size).to(self.device)
-            r = min(self.input_size[0] / x.shape[0], self.input_size[1] / x.shape[1])
-            padded[: int(x.shape[0] * r), : int(x.shape[1] * r)] = x
+        with nvtx_range('pad'):
+            if (h, w) == self.input_size:
+                padded = x
+            else:
+                padded = torch.zeros(self.input_size).to(self.device)
+                r = min(self.input_size[0] / x.shape[0], self.input_size[1] / x.shape[1])
+                padded[: int(x.shape[0] * r), : int(x.shape[1] * r)] = x
 
-        padded = padded.to(self.device).unsqueeze(0).float()
+            padded = padded.to(self.device).unsqueeze(0).float()
         return padded
 
 
@@ -191,35 +210,40 @@ class Predictor(object):
         self.to_tensor = self.to_tensor.to(device)
 
     def inference(self, img, timer, dump_input=False):
-        img_info = {"id": 0}
-        if isinstance(img, str):
-            img_info["file_name"] = osp.basename(img)
-            img = cv2.imread(img)
-        else:
-            img_info["file_name"] = None
+        with nvtx_range('infer0'):
+            img_info = {"id": 0}
+            if isinstance(img, str):
+                img_info["file_name"] = osp.basename(img)
+                img = cv2.imread(img)
+            else:
+                img_info["file_name"] = None
 
-        height, width = img.shape[:2]
-        img_info["height"] = height
-        img_info["width"] = width
-        img_info["raw_img"] = img
-        ratio = min(self.test_size[0] / img.shape[0], self.test_size[1] / img.shape[1])
-        img_info["ratio"] = ratio
-        input = self.to_tensor(img)
-        if self.fp16 and not self.trt:
-            input = input.half()
+        with nvtx_range('infer1'):
+            height, width = img.shape[:2]
+            img_info["height"] = height
+            img_info["width"] = width
+            img_info["raw_img"] = img
+            ratio = min(self.test_size[0] / img.shape[0], self.test_size[1] / img.shape[1])
+            img_info["ratio"] = ratio
+            input = self.to_tensor(img)
+            if self.fp16 and not self.trt:
+                input = input.half()
 
         with torch.no_grad():
-            timer.tic()
-            if dump_input:
-                np.save(f'inp_{dump_input}.npy', img.cpu())
-            outputs = self.model(input)
+            with nvtx_range('Model'):
+                timer.tic()
+                if dump_input:
+                    np.save(f'inp_{dump_input}.npy', img.cpu())
+                outputs = self.model(input)
 
-            if self.decoder is not None:
-                outputs = self.decoder(outputs, dtype=outputs.type())
-            if dump_input:
-                np.save(f'oup_{dump_input}.npy', outputs.cpu())
-                import pdb; pdb.set_trace()
-            outputs = postprocess(outputs, self.num_classes, self.confthre, self.nmsthre, agnostic=True)
+            with nvtx_range('decode'):
+                if self.decoder is not None:
+                    outputs = self.decoder(outputs, dtype=outputs.type())
+                if dump_input:
+                    np.save(f'oup_{dump_input}.npy', outputs.cpu())
+                    import pdb; pdb.set_trace()
+            with nvtx_range('post'):
+                outputs = postprocess(outputs, self.num_classes, self.confthre, self.nmsthre, agnostic=True)
         return outputs, img_info
 
 
@@ -244,6 +268,8 @@ def imageflow_demo(dataloader, predictor, current_time, args, result_filename, v
 
     print_flag = True
     last_play = -1
+    if args.prof:
+        torch.cuda.cudart().cudaProfilerStart()
     for frame_id, (vid_fnum, play_num, frame) in enumerate(dataloader):
         if play_num != last_play:
             logger.info(f'Start play {play_num} frame {vid_fnum}')
@@ -258,15 +284,20 @@ def imageflow_demo(dataloader, predictor, current_time, args, result_filename, v
             video_frame_fn = result_filename.replace('csv', 'png')
             cv2.imwrite(video_frame_fn, frame)
 
+        if args.prof and frame_id == 200:
+            torch.cuda.cudart().cudaProfilerStop()
+            return
+
         # Run tracker
         frame_print = None
 
         # Detect objects
-        outputs, img_info = predictor.inference(frame, timer, dump_input=frame_print)
-        dets = outputs[0]
-        # scale back to original image size
-        scale_x = exp.test_size[1] / float(img_info['width'])
-        scale_y = exp.test_size[0] / float(img_info['height'])
+        with nvtx_range('infer'):
+            outputs, img_info = predictor.inference(frame, timer, dump_input=frame_print)
+            dets = outputs[0]
+            # scale back to original image size
+            scale_x = exp.test_size[1] / float(img_info['width'])
+            scale_y = exp.test_size[0] / float(img_info['height'])
 
         if print_flag:
             w, h = img_info['width'], img_info['height']
@@ -274,72 +305,69 @@ def imageflow_demo(dataloader, predictor, current_time, args, result_filename, v
             print_flag = False
 
         if dets is not None:
-            # scale bbox predictions according to image size
-            outputs = outputs[0].cpu().numpy()
-            detections = outputs[:, :7]
-            detections[:, :4] /= np.array([scale_x, scale_y, scale_x, scale_y])
-            online_targets = tracker.update(detections, img_info["raw_img"],
-                                            frame_print=frame_print)
+            with nvtx_range('trk-update'):
+                # scale bbox predictions according to image size
+                outputs = outputs[0].cpu().numpy()
+                detections = outputs[:, :7]
+                detections[:, :4] /= np.array([scale_x, scale_y, scale_x, scale_y])
+                online_targets = tracker.update(detections, img_info["raw_img"],
+                                                frame_print=frame_print)
 
-            online_tlwhs = []
-            online_ids = []
-            online_scores = []
-            online_jumping = []
-            online_nearfar = []
-            for trk in online_targets:
-                tlwh = trk.tlwh
-                tid = trk.track_id
-                tlwh = trk.tlwh
-                dxdy = trk.dxdy
-                tlen = trk.tracklet_len
-                nearfar = trk.cls
-                is_jumping = trk.jumping
-                if tlwh[2] * tlwh[3] > args.min_box_area:
-                    online_tlwhs.append(tlwh)
-                    online_ids.append(tid)
-                    online_scores.append(trk.score)
-                    online_jumping.append(is_jumping)
-                    online_nearfar.append(nearfar)
-                    csv_str = (f'{vid_fnum},{tid},{tlwh[0]:.2f},{tlwh[1]:.2f},{tlwh[2]:.2f},'
-                               f'{tlwh[3]:.2f},{play_num},{nearfar},{is_jumping},{vid_fnum},'
-                               f'{dxdy[0]},{dxdy[1]},{tlen}\n')
-                    results_wr.write(csv_str)
+            with nvtx_range('results-wr'):
+                online_tlwhs = []
+                online_ids = []
+                online_scores = []
+                online_jumping = []
+                online_nearfar = []
+                for trk in online_targets:
+                    tlwh = trk.tlwh
+                    tid = trk.track_id
+                    tlwh = trk.tlwh
+                    dxdy = trk.dxdy
+                    tlen = trk.tracklet_len
+                    nearfar = trk.cls
+                    is_jumping = trk.jumping
+                    if tlwh[2] * tlwh[3] > args.min_box_area:
+                        online_tlwhs.append(tlwh)
+                        online_ids.append(tid)
+                        online_scores.append(trk.score)
+                        online_jumping.append(is_jumping)
+                        online_nearfar.append(nearfar)
+                        csv_str = (f'{vid_fnum},{tid},{tlwh[0]:.2f},{tlwh[1]:.2f},{tlwh[2]:.2f},'
+                                   f'{tlwh[3]:.2f},{play_num},{nearfar},{is_jumping},{vid_fnum},'
+                                   f'{dxdy[0]},{dxdy[1]},{tlen}\n')
+                        results_wr.write(csv_str)
 
             timer.toc()
-            online_im = plot_tracking_mc(
-                image=img_info['raw_img'],
-                tlwhs=online_tlwhs,
-                obj_ids=online_ids,
-                jumping=online_jumping,
-                nearfar=online_nearfar,
-                num_classes=tracker.num_classes,
-                frame_id=vid_fnum,
-                fps=1. / timer.average_time,
-                play_num=play_num,
-            )
+            with nvtx_range('plot'):
+                online_im = plot_tracking_mc(
+                    image=img_info['raw_img'],
+                    tlwhs=online_tlwhs,
+                    obj_ids=online_ids,
+                    jumping=online_jumping,
+                    nearfar=online_nearfar,
+                    num_classes=tracker.num_classes,
+                    frame_id=vid_fnum,
+                    fps=1. / timer.average_time,
+                    play_num=play_num,
+                )
         else:
             timer.toc()
             online_im = img_info['raw_img']
 
-        vid_writer.write(online_im)
+        with nvtx_range('wr-vid'):
+            vid_writer.write(online_im)
 
     logger.info(f"Saved tracking results to {result_filename}")
 
 
 def setup_volleyvision(args):
-    if args.tag is not None:
-        result_root = osp.join(cfg.output_root, 'BotSort', args.tag, exp.exp_name, args.match_name)
-    else:
-        result_root = osp.join(cfg.output_root, 'BotSort', exp.exp_name, args.match_name)
-    os.makedirs(result_root, exist_ok=True)
+    os.makedirs(args.outdir, exist_ok=True)
 
-    setup_logger(result_root, filename="log.log")
-
-    if args.play_vid:
-        vid_basename = osp.splitext(osp.basename(args.play_vid))[0]
-        result_filename = os.path.join(result_root, f'{vid_basename}.csv')
-    else:
-        result_filename = os.path.join(result_root, f'{args.view}.csv')
+    # Support unified output dir
+    setup_logger(args.outdir, filename="tracker.log")
+    result_filename = os.path.join(args.outdir, 'tracker.csv')
+    output_video_path = osp.join(args.outdir, 'tracker.mp4')
 
     print(f'Max plays {args.max_plays}')
     print(f'Max frames {args.max_frames}')
@@ -347,39 +375,21 @@ def setup_volleyvision(args):
     if not args.experiment_name:
         args.experiment_name = exp.exp_name
 
-    if args.play_vid:
-        dataloader = LoadVideo(args.play_vid)
-    else:
-        mobj = Match(args.match_name,
-                     args.view,
-                     args.max_plays,
-                     use_offset=False,
-                     unsquashed=args.unsquashed,
-                     no_dv=args.no_dv,
-                     start_pad=args.start_pad,
-                     end_pad=args.end_pad)
-        try:
-            pass
-        except:
-            print(f'ERROR: some problem reading in match {args.match_name} '
-                  '... SKIPPING')
-            raise
-
-        dataloader = LoadVideo(mobj.vid_fn,
-                               plays=mobj.plays,
-                               max_frames=args.max_frames)
-
-    output_video_path = osp.join(result_root, f'{args.view}.mp4')
-    vid_writer = cv2.VideoWriter(
-        output_video_path, cv2.VideoWriter_fourcc(*"avc1"),
-        dataloader.frame_rate, (dataloader.width, dataloader.height)
-    )
-    court = BevCourt(args.match_name, args.view, result_root)
-    return result_root, result_filename, vid_writer, court, dataloader
+    dataloader = LoadVideo(args.play_vid)
+    #vid_writer = cv2.VideoWriter(
+    #    output_video_path, cv2.VideoWriter_fourcc(*"avc1"),
+    #    dataloader.frame_rate, (dataloader.width, dataloader.height)
+    #)
+    vid_writer = ffmpegcv.noblock(ffmpegcv.VideoWriterNV,
+                                  output_video_path,
+                                  codec='hevc',
+                                  fps=dataloader.frame_rate)
+    court = BevCourt(args.match_name, args.view, args.outdir)
+    return result_filename, vid_writer, court, dataloader
 
 
 def main(exp, args):
-    result_root, result_filename, vid_writer, court, dataloader = setup_volleyvision(args)
+    result_filename, vid_writer, court, dataloader = setup_volleyvision(args)
 
     if args.trt:
         args.device = "gpu"
@@ -400,7 +410,7 @@ def main(exp, args):
 
     if not args.trt:
         if args.ckpt is None:
-            ckpt_file = osp.join(result_root, "best_ckpt.pth.tar")
+            ckpt_file = osp.join(args.outdir, "best_ckpt.pth.tar")
         else:
             ckpt_file = args.ckpt
         logger.info("loading checkpoint")
@@ -434,8 +444,9 @@ def main(exp, args):
 
     predictor = Predictor(model, exp, trt_file, decoder, args.device, args.fp16)
     current_time = time.localtime()
-    imageflow_demo(dataloader, predictor, current_time, args, result_filename,
-                   vid_writer, court)
+    with nvtx_range('vid-loop'):
+        imageflow_demo(dataloader, predictor, current_time, args, result_filename,
+                       vid_writer, court)
 
 
 if __name__ == "__main__":

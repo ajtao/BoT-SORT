@@ -33,7 +33,6 @@ from yolox.utils.visualize import plot_tracking_mc
 from tracker.vball_sort import VbSORT
 from tracker.tracking_utils.timer import Timer
 
-from vtrak.dataloader import LoadVideo
 from vtrak.court import BevCourt
 from vtrak.vball_misc import run_ffprobe
 
@@ -154,14 +153,21 @@ def tensor_to_mat(img_tensor: torch.tensor):
     Convert planar RGB cuda float tensor to OpenCV uint8 rgb Mat
     CHW -> HWC
     """
-    img_r = img_tensor[0].cpu().numpy()
-    img_g = img_tensor[1].cpu().numpy()
-    img_b = img_tensor[2].cpu().numpy()
+    if 0:
+        img_bgr = torch.zeros((img_tensor.shape[1], img_tensor.shape[2], 3), dtype=torch.uint8,
+                              device=img_tensor.device)
+        img_bgr[..., 2] = img_tensor[0]  # r
+        img_bgr[..., 1] = img_tensor[1]  # g
+        img_bgr[..., 0] = img_tensor[2]  # b
+    else:
+        img_r = img_tensor[0].cpu().numpy()
+        img_g = img_tensor[1].cpu().numpy()
+        img_b = img_tensor[2].cpu().numpy()
 
-    img_bgr = np.empty((img_r.shape[0], img_r.shape[1], 3), "uint8")
-    img_bgr[..., 0] = img_b
-    img_bgr[..., 1] = img_g
-    img_bgr[..., 2] = img_r
+        img_bgr = np.empty((img_r.shape[0], img_r.shape[1], 3), "uint8")
+        img_bgr[..., 0] = img_b
+        img_bgr[..., 1] = img_g
+        img_bgr[..., 2] = img_r
 
     return img_bgr
 
@@ -193,6 +199,11 @@ class VideoReaderVPF():
 
         # Use bt709 and jpeg just for illustration purposes.
         self.cc_ctx = nvc.ColorspaceConversionContext(nvc.ColorSpace.BT_709, nvc.ColorRange.JPEG)
+
+        self.resize = transforms.Resize((self.target_h, self.target_w))
+        self.norm = transforms.Normalize(
+            mean=[0.485, 0.456, 0.406], std=[0.229, 0.224, 0.225]
+        )
 
     def read(self):
         with nvtx_range('read1'):
@@ -228,28 +239,49 @@ class VideoReaderVPF():
             # pytorch expects it's tensor data to be arranged.
             img_tensor.resize_(3, self.native_h, self.native_w)
 
-        with nvtx_range('read2'):
-            img_tensor = img_tensor.type(dtype=torch.cuda.FloatTensor)
-            image_rgb = tensor_to_mat(img_tensor)
-            img_tensor = torch.divide(img_tensor, 255.0)
+        if 1:
+            with nvtx_range('read2'):
+                img_tensor = img_tensor.type(dtype=torch.cuda.FloatTensor)
+                resize_tensor = self.resize(img_tensor)
+                image_rgb = tensor_to_mat(resize_tensor)
+                rgb_tensor = torch.divide(resize_tensor, 255.0)
 
-        with nvtx_range('read3'):
-            # RGB -> BGR
-            bgr_tensor = torch.stack(
-                [img_tensor[2, :, :],
-                 img_tensor[1, :, :],
-                 img_tensor[0, :, :]]
-            )
-        with nvtx_range('read4'):
-            data_transforms = transforms.Resize((self.target_h, self.target_w))
-            surface_tensor = data_transforms(bgr_tensor)
-            norm = transforms.Normalize(
-                    mean=[0.485, 0.456, 0.406], std=[0.229, 0.224, 0.225]
-            )
-            norm_tensor = norm(surface_tensor)
+            with nvtx_range('read3'):
+                # RGB -> BGR
+                bgr_tensor = torch.stack(
+                    [rgb_tensor[2, :, :],
+                     rgb_tensor[1, :, :],
+                     rgb_tensor[0, :, :]]
+                )
+            with nvtx_range('read4'):
+                norm_tensor = self.norm(bgr_tensor)
 
-            # n c h w
-            input_batch = norm_tensor.unsqueeze(0).to("cuda")
+                # n c h w
+                input_batch = norm_tensor.unsqueeze(0).to("cuda")
+        else:
+            with nvtx_range('read2'):
+                img_tensor = img_tensor.type(dtype=torch.cuda.FloatTensor)
+                image_rgb = tensor_to_mat(img_tensor)
+                img_tensor = torch.divide(img_tensor, 255.0)
+
+            with nvtx_range('read3'):
+                # RGB -> BGR
+                bgr_tensor = torch.stack(
+                    [img_tensor[2, :, :],
+                     img_tensor[1, :, :],
+                     img_tensor[0, :, :]]
+                )
+            with nvtx_range('read4'):
+                data_transforms = transforms.Resize((self.target_h, self.target_w))
+                surface_tensor = data_transforms(bgr_tensor)
+                norm = transforms.Normalize(
+                        mean=[0.485, 0.456, 0.406], std=[0.229, 0.224, 0.225]
+                )
+                norm_tensor = norm(surface_tensor)
+
+                # n c h w
+                input_batch = norm_tensor.unsqueeze(0).to("cuda")
+
         return input_batch, image_rgb
 
 
@@ -314,8 +346,7 @@ class Predictor(object):
         return outputs, img_info
 
 
-def imageflow_demo(dataloader, predictor, current_time, args, result_filename, vid_writer,
-                   court):
+def imageflow_demo(predictor, current_time, args, court):
     tracker = VbSORT(args, frame_rate=args.fps)
 
     # ----- class name to class id and class id to class name
@@ -328,32 +359,44 @@ def imageflow_demo(dataloader, predictor, current_time, args, result_filename, v
     timer = Timer()
     start_time = time.time()
 
+    # Unified output
+    result_filename = os.path.join(args.outdir, 'tracker.csv')
+    output_video_path = osp.join(args.outdir, 'tracker.mp4')
+
     results_wr = open(result_filename, 'w')
     header = 'frame,id,x1,y1,w,h,play,class,is_jumping,ori_fnum,dx,dy,tlen\n'
     results_wr.write(header)
 
     vid_info = run_ffprobe(args.play_vid)
     num_frames = vid_info.num_frames
+    fps = vid_info.fps
+    vid_writer = ffmpegcv.noblock(ffmpegcv.VideoWriterNV,
+                                  output_video_path,
+                                  codec='hevc',
+                                  fps=fps)
+
     # scale back to original image size
-    scale_x = exp.test_size[1] / float(vid_info.width)
-    scale_y = exp.test_size[0] / float(vid_info.height)
+    if 1:
+        scale_x = 1
+        scale_y = 1
+    else:
+        scale_x = exp.test_size[1] / float(vid_info.width)
+        scale_y = exp.test_size[0] / float(vid_info.height)
 
     gpu_id = torch.cuda.current_device()
     vpf_reader = VideoReaderVPF(args.play_vid,
                                 gpu_id,
                                 target_w=exp.test_size[1],
                                 target_h=exp.test_size[0])
-    cap = ffmpegcv.VideoCaptureNV(args.play_vid)
 
     if args.prof:
         torch.cuda.cudart().cudaProfilerStart()
 
-    pbar = tqdm(total=num_frames, desc='tracking video')
+    pbar = tqdm(total=num_frames, desc='tracking video', mininterval=5)
     fnum = 0
     while 1:
         with nvtx_range('readvid'):
             sample, image = vpf_reader.read()
-            # cap_status, image = cap.read()
             cap_status = True
 
         if sample is None or not cap_status:
@@ -366,11 +409,6 @@ def imageflow_demo(dataloader, predictor, current_time, args, result_filename, v
             break
 
         fnum += 1
-
-        if fnum % 200 == 0:
-            cur_time = time.time()
-            fps = fnum / (cur_time - start_time)
-            logger.info(f'Processing frame {fnum} ({fps:.2f} fps)')
 
         if fnum == 1:
             video_frame_fn = result_filename.replace('csv', 'png')
@@ -392,6 +430,7 @@ def imageflow_demo(dataloader, predictor, current_time, args, result_filename, v
                 # scale bbox predictions according to image size
                 outputs = outputs[0].cpu().numpy()
                 detections = outputs[:, :7]
+                # Scale to native image size
                 detections[:, :4] /= np.array([scale_x, scale_y, scale_x, scale_y])
                 online_targets = tracker.update(detections, image)
 
@@ -450,8 +489,6 @@ def setup_volleyvision(args):
 
     # Support unified output dir
     setup_logger(args.outdir, filename="tracker.log")
-    result_filename = os.path.join(args.outdir, 'tracker.csv')
-    output_video_path = osp.join(args.outdir, 'tracker.mp4')
 
     print(f'Max plays {args.max_plays}')
     print(f'Max frames {args.max_frames}')
@@ -459,17 +496,12 @@ def setup_volleyvision(args):
     if not args.experiment_name:
         args.experiment_name = exp.exp_name
 
-    dataloader = LoadVideo(args.play_vid)
-    vid_writer = ffmpegcv.noblock(ffmpegcv.VideoWriterNV,
-                                  output_video_path,
-                                  codec='hevc',
-                                  fps=dataloader.frame_rate)
     court = BevCourt(args.match_name, args.view, args.outdir)
-    return result_filename, vid_writer, court, dataloader
+    return court
 
 
 def main(exp, args):
-    result_filename, vid_writer, court, dataloader = setup_volleyvision(args)
+    court = setup_volleyvision(args)
 
     if args.trt:
         args.device = "gpu"
@@ -528,8 +560,7 @@ def main(exp, args):
     predictor = Predictor(model, exp, trt_file, decoder, args.device, args.fp16)
     current_time = time.localtime()
     with nvtx_range('vid-loop'):
-        imageflow_demo(dataloader, predictor, current_time, args, result_filename,
-                       vid_writer, court)
+        imageflow_demo(predictor, current_time, args, court)
 
 
 if __name__ == "__main__":

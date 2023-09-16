@@ -357,7 +357,6 @@ def imageflow_demo(predictor, current_time, args, court):
         cls2id[cls_name] = cls_id
 
     timer = Timer()
-    start_time = time.time()
 
     # Unified output
     result_filename = os.path.join(args.outdir, 'tracker.csv')
@@ -376,12 +375,8 @@ def imageflow_demo(predictor, current_time, args, court):
                                   fps=fps)
 
     # scale back to original image size
-    if 1:
-        scale_x = 1
-        scale_y = 1
-    else:
-        scale_x = exp.test_size[1] / float(vid_info.width)
-        scale_y = exp.test_size[0] / float(vid_info.height)
+    scale_x = exp.test_size[1] / float(vid_info.width)
+    scale_y = exp.test_size[0] / float(vid_info.height)
 
     gpu_id = torch.cuda.current_device()
     vpf_reader = VideoReaderVPF(args.play_vid,
@@ -392,7 +387,7 @@ def imageflow_demo(predictor, current_time, args, court):
     if args.prof:
         torch.cuda.cudart().cudaProfilerStart()
 
-    pbar = tqdm(total=num_frames, desc='tracking video', mininterval=5)
+    pbar = tqdm(total=num_frames, desc='tracking video', mininterval=10)
     fnum = 0
     while 1:
         with nvtx_range('readvid'):
@@ -443,21 +438,23 @@ def imageflow_demo(predictor, current_time, args, court):
                 for trk in online_targets:
                     tlwh = trk.tlwh
                     tid = trk.track_id
-                    tlwh = trk.tlwh
                     dxdy = trk.dxdy
                     tlen = trk.tracklet_len
                     nearfar = trk.cls
                     is_jumping = trk.jumping
                     if tlwh[2] * tlwh[3] > args.min_box_area:
+                        csv_str = (f'{fnum},{tid},{tlwh[0]:.2f},{tlwh[1]:.2f},{tlwh[2]:.2f},'
+                                   f'{tlwh[3]:.2f},0,{nearfar},{is_jumping},{fnum},'
+                                   f'{dxdy[0]},{dxdy[1]},{tlen}\n')
+                        results_wr.write(csv_str)
+
+                        tlwh = tlwh * np.array([scale_x, scale_y, scale_x, scale_y])
+                        dxdy = dxdy * np.array([scale_x, scale_y])
                         online_tlwhs.append(tlwh)
                         online_ids.append(tid)
                         online_scores.append(trk.score)
                         online_jumping.append(is_jumping)
                         online_nearfar.append(nearfar)
-                        csv_str = (f'{fnum},{tid},{tlwh[0]:.2f},{tlwh[1]:.2f},{tlwh[2]:.2f},'
-                                   f'{tlwh[3]:.2f},0,{nearfar},{is_jumping},{fnum},'
-                                   f'{dxdy[0]},{dxdy[1]},{tlen}\n')
-                        results_wr.write(csv_str)
 
             timer.toc()
             with nvtx_range('plot'):

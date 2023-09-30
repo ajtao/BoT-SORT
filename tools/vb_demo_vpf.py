@@ -63,6 +63,7 @@ def make_parser():
     parser.add_argument("--nms", default=0.65, type=float, help="test nms threshold")
     parser.add_argument("--tsize", default=None, type=str, help="test img size (w,h)")
     parser.add_argument("--fps", default=30, type=int, help="frame rate (fps)")
+    parser.add_argument("--novid", action="store_true", help="Skip output video")
     parser.add_argument("--fp16", dest="fp16", default=False, action="store_true",help="Adopting mix precision evaluating.")
     parser.add_argument("--fuse", dest="fuse", default=False, action="store_true", help="Fuse conv and bn for testing.")
     parser.add_argument("--trt", dest="trt", default=False, action="store_true", help="Using TensorRT model for testing.")
@@ -362,6 +363,7 @@ def imageflow_demo(predictor, current_time, args, court):
     result_filename = os.path.join(args.outdir, 'tracker.csv')
     output_video_path = osp.join(args.outdir, 'tracker.mp4')
 
+    dets_wr = open(osp.join(args.outdir, 'dets.csv'), 'w')
     results_wr = open(result_filename, 'w')
     header = 'frame,id,x1,y1,w,h,play,class,is_jumping,ori_fnum,dx,dy,tlen\n'
     results_wr.write(header)
@@ -369,10 +371,11 @@ def imageflow_demo(predictor, current_time, args, court):
     vid_info = run_ffprobe(args.play_vid)
     num_frames = vid_info.num_frames
     fps = vid_info.fps
-    vid_writer = ffmpegcv.noblock(ffmpegcv.VideoWriterNV,
-                                  output_video_path,
-                                  codec='hevc',
-                                  fps=fps)
+    if not args.novid:
+        vid_writer = ffmpegcv.noblock(ffmpegcv.VideoWriterNV,
+                                      output_video_path,
+                                      codec='hevc',
+                                      fps=fps)
 
     # scale back to original image size
     scale_x = exp.test_size[1] / float(vid_info.width)
@@ -456,25 +459,32 @@ def imageflow_demo(predictor, current_time, args, court):
                         online_jumping.append(is_jumping)
                         online_nearfar.append(nearfar)
 
+                        # save detections
+                        dets_str = (f'{fnum},-1,{tlwh[0]:.2f},{tlwh[1]:.2f},{tlwh[2]:.2f},'
+                                    f'{tlwh[3]:.2f},{trk.score:0.2f},-1,-1\n')
+                        dets_wr.write(dets_str)
+
             timer.toc()
-            with nvtx_range('plot'):
-                online_im = plot_tracking_mc(
-                    image=image,
-                    tlwhs=online_tlwhs,
-                    obj_ids=online_ids,
-                    jumping=online_jumping,
-                    nearfar=online_nearfar,
-                    num_classes=tracker.num_classes,
-                    frame_id=fnum,
-                    fps=1. / timer.average_time,
-                    play_num=0,
-                )
+            if not args.novid:
+                with nvtx_range('plot'):
+                    online_im = plot_tracking_mc(
+                        image=image,
+                        tlwhs=online_tlwhs,
+                        obj_ids=online_ids,
+                        jumping=online_jumping,
+                        nearfar=online_nearfar,
+                        num_classes=tracker.num_classes,
+                        frame_id=fnum,
+                        fps=1. / timer.average_time,
+                        play_num=0,
+                    )
         else:
             timer.toc()
             online_im = image
 
-        with nvtx_range('wr-vid'):
-            vid_writer.write(online_im)
+        if not args.novid:
+            with nvtx_range('wr-vid'):
+                vid_writer.write(online_im)
 
         pbar.update()
 

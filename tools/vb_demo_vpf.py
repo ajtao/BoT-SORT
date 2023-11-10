@@ -363,7 +363,7 @@ def imageflow_demo(predictor, current_time, args, court):
     result_filename = os.path.join(args.outdir, 'tracker.csv')
     output_video_path = osp.join(args.outdir, 'tracker.mp4')
 
-    dets_wr = open(osp.join(args.outdir, 'dets.csv'), 'w')
+    dets_wr = open(osp.join(args.outdir, 'yolox.csv'), 'w')
     results_wr = open(result_filename, 'w')
     header = 'frame,id,x1,y1,w,h,play,class,is_jumping,ori_fnum,dx,dy,tlen\n'
     results_wr.write(header)

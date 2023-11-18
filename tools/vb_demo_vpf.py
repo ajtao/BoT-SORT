@@ -33,7 +33,6 @@ from yolox.utils.visualize import plot_tracking_mc
 from tracker.vball_sort import VbSORT
 from tracker.tracking_utils.timer import Timer
 
-from vtrak.court import BevCourt
 from vtrak.vball_misc import run_ffprobe
 
 
@@ -347,7 +346,7 @@ class Predictor(object):
         return outputs, img_info
 
 
-def imageflow_demo(predictor, current_time, args, court):
+def imageflow_demo(predictor, current_time, args):
     tracker = VbSORT(args, frame_rate=args.fps)
 
     # ----- class name to class id and class id to class name
@@ -446,9 +445,9 @@ def imageflow_demo(predictor, current_time, args, court):
                     nearfar = trk.cls
                     is_jumping = trk.jumping
                     if tlwh[2] * tlwh[3] > args.min_box_area:
-                        csv_str = (f'{fnum},{tid},{tlwh[0]:.2f},{tlwh[1]:.2f},{tlwh[2]:.2f},'
-                                   f'{tlwh[3]:.2f},0,{nearfar},{is_jumping},{fnum},'
-                                   f'{dxdy[0]},{dxdy[1]},{tlen}\n')
+                        csv_str = (f'{fnum},{tid},{int(tlwh[0]):d},{int(tlwh[1]):d},{int(tlwh[2]):d},'
+                                   f'{int(tlwh[3]):d},0,{nearfar},{is_jumping},{fnum},'
+                                   f'{dxdy[0]:.4f},{dxdy[1]:.4f},{tlen:.4f}\n')
                         results_wr.write(csv_str)
 
                         tlwh = tlwh * np.array([scale_x, scale_y, scale_x, scale_y])
@@ -460,8 +459,8 @@ def imageflow_demo(predictor, current_time, args, court):
                         online_nearfar.append(nearfar)
 
                         # save detections
-                        dets_str = (f'{fnum},-1,{tlwh[0]:.2f},{tlwh[1]:.2f},{tlwh[2]:.2f},'
-                                    f'{tlwh[3]:.2f},{trk.score:0.2f},-1,-1\n')
+                        dets_str = (f'{fnum},-1,{int(tlwh[0]):d},{int(tlwh[1]):d},{int(tlwh[2]):d},'
+                                    f'{int(tlwh[3]):d},{trk.score:0.2f},-1,-1\n')
                         dets_wr.write(dets_str)
 
             timer.toc()
@@ -503,13 +502,8 @@ def setup_volleyvision(args):
     if not args.experiment_name:
         args.experiment_name = exp.exp_name
 
-    court = BevCourt(args.match_name, args.view, args.outdir)
-    return court
-
 
 def main(exp, args):
-    court = setup_volleyvision(args)
-
     if args.trt:
         args.device = "gpu"
     args.device = torch.device("cuda" if args.device == "gpu" else "cpu")
@@ -567,7 +561,7 @@ def main(exp, args):
     predictor = Predictor(model, exp, trt_file, decoder, args.device, args.fp16)
     current_time = time.localtime()
     with nvtx_range('vid-loop'):
-        imageflow_demo(predictor, current_time, args, court)
+        imageflow_demo(predictor, current_time, args)
 
 
 if __name__ == "__main__":

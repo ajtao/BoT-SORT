@@ -370,17 +370,20 @@ def imageflow_demo(predictor, current_time, args):
     vid_info = run_ffprobe(args.play_vid)
     num_frames = vid_info.num_frames
     fps = vid_info.fps
+    gpu_id = torch.cuda.current_device()
+    logger.info(f'gpu_id {gpu_id}')
+    print(f'\n\ngpu_id {gpu_id}\n\n')
     if not args.novid:
         vid_writer = ffmpegcv.noblock(ffmpegcv.VideoWriterNV,
                                       output_video_path,
                                       codec='hevc',
+                                      # gpu=gpu_id,
                                       fps=fps)
 
     # scale back to original image size
     scale_x = exp.test_size[1] / float(vid_info.width)
     scale_y = exp.test_size[0] / float(vid_info.height)
 
-    gpu_id = torch.cuda.current_device()
     vpf_reader = VideoReaderVPF(args.play_vid,
                                 gpu_id,
                                 target_w=exp.test_size[1],

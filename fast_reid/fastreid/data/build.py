@@ -8,7 +8,10 @@ import logging
 import os
 
 import torch
-from collections import Mapping
+if sys.version_info >= (3, 10):
+    from collections.abc import Mapping
+else:
+    from collections import Mapping
 
 from fast_reid.fastreid.config import configurable
 from fast_reid.fastreid.utils import comm

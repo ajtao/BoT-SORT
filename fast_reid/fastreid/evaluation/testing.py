@@ -2,7 +2,11 @@
 import logging
 import pprint
 import sys
-from collections import Mapping, OrderedDict
+if sys.version_info >= (3, 10):
+    from collections.abc import Mapping
+else:
+    from collections import Mapping
+from collections import OrderedDict
 
 import numpy as np
 from tabulate import tabulate

@@ -8,6 +8,7 @@ import logging
 import os
 
 import torch
+import sys
 if sys.version_info >= (3, 10):
     from collections.abc import Mapping
 else:

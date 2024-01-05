@@ -278,9 +278,9 @@ def imageflow_demo(predictor, current_time, args):
 
         if fnum == 1:
            video_frame_fn = result_filename.replace('csv', 'png')
-           print(f'img_size w,h = {vid_info.width},{vid_info.height}, '
+           print(f'Native video resolution w,h = {vid_info.width},{vid_info.height}, '
                  f'scale={scale_x:2.2f},{scale_y:2.2f}')
-           print(f'image {image.shape} sample {sample.shape}')
+           print(f'Inference image {image.shape} sample {sample.shape}')
            cv2.imwrite(video_frame_fn, image)
 
         # Detect objects

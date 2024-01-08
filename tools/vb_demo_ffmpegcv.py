@@ -2,6 +2,7 @@ import argparse
 import os
 import os.path as osp
 import time
+import json
 from collections import defaultdict
 
 import contextlib
@@ -13,6 +14,7 @@ from torch.cuda.amp import autocast
 import ffmpegcv
 
 from loguru import logger
+import pandas as pd
 import numpy as np
 from tqdm import tqdm
 
@@ -24,7 +26,7 @@ from tracker.vball_sort import VbSORT
 from tracker.tracking_utils.timer import Timer
 
 from vtrak.config import cfg
-from vtrak.vball_misc import run_ffprobe
+from vtrak.vball_misc import run_ffprobe, read_play_frames
 
 
 IMAGE_EXT = [".jpg", ".jpeg", ".webp", ".bmp", ".png"]
@@ -45,6 +47,7 @@ def make_parser():
     parser.add_argument("-expn", "--experiment-name", type=str, default=None)
     parser.add_argument("-n", "--name", type=str, default=None, help="model name")
     parser.add_argument("--path", default="", help="path to images or video")
+    parser.add_argument("--plays-json", help='path to ball play frames json')
     parser.add_argument("--camid", type=int, default=0, help="webcam demo camera id")
     parser.add_argument("-f", "--exp_file", default=None, type=str, help="pls input your expriment description file")
     parser.add_argument("-c", "--ckpt", default=None, type=str, help="ckpt for eval")
@@ -233,8 +236,6 @@ def imageflow_demo(predictor, current_time, args):
 
     dets_wr = open(osp.join(args.outdir, 'yolox.csv'), 'w')
     results_wr = open(result_filename, 'w')
-    header = 'frame,id,x1,y1,w,h,play,class,is_jumping,ori_fnum,dx,dy,tlen\n'
-    results_wr.write(header)
 
     vid_info = run_ffprobe(args.play_vid)
     num_frames = vid_info.num_frames
@@ -266,22 +267,31 @@ def imageflow_demo(predictor, current_time, args):
     if args.prof:
         torch.cuda.cudart().cudaProfilerStart()
 
+    play_frames = read_play_frames(args.plays_json)
     pbar = tqdm(total=num_frames, desc='tracking video', mininterval=10)
     fnum = 0
+    header = 'frame,id,x1,y1,w,h,play,class,is_jumping,ori_fnum,dx,dy,tlen\n'
+    results_wr.write(header)
 
     for image in ff_reader:
-        with torch.no_grad():
-            sample = my_t(image)
-            # image (h, w, c) ndarray
-
+        pbar.update()
         fnum += 1
 
         if fnum == 1:
            video_frame_fn = result_filename.replace('csv', 'png')
            print(f'Native video resolution w,h = {vid_info.width},{vid_info.height}, '
                  f'scale={scale_x:2.2f},{scale_y:2.2f}')
-           print(f'Inference image {image.shape} sample {sample.shape}')
+           print(f'Inference image shape {image.shape}')
            cv2.imwrite(video_frame_fn, image)
+
+        if fnum not in play_frames:
+            continue
+        else:
+            play = play_frames[fnum]
+        
+        with torch.no_grad():
+            sample = my_t(image)
+            # image (h, w, c) ndarray
 
         # Detect objects
         with nvtx_range('infer'):
@@ -312,7 +322,7 @@ def imageflow_demo(predictor, current_time, args):
                     is_jumping = trk.jumping
                     if tlwh[2] * tlwh[3] > args.min_box_area:
                         csv_str = (f'{fnum},{tid},{int(tlwh[0]):d},{int(tlwh[1]):d},{int(tlwh[2]):d},'
-                                   f'{int(tlwh[3]):d},0,{nearfar},{is_jumping},{fnum},'
+                                   f'{int(tlwh[3]):d},{play},{nearfar},{is_jumping},{fnum},'
                                    f'{dxdy[0]:.4f},{dxdy[1]:.4f},{tlen:.4f}\n')
                         results_wr.write(csv_str)
 
@@ -341,7 +351,7 @@ def imageflow_demo(predictor, current_time, args):
                         num_classes=tracker.num_classes,
                         frame_id=fnum,
                         fps=1. / timer.average_time,
-                        play_num=0,
+                        play_num=play,
                     )
         else:
             timer.toc()
@@ -351,7 +361,6 @@ def imageflow_demo(predictor, current_time, args):
             with nvtx_range('wr-vid'):
                 vid_writer.write(online_im)
 
-        pbar.update()
 
     logger.info(f"Saved tracking results to {result_filename}")
 

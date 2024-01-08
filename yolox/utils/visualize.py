@@ -84,7 +84,7 @@ def plot_tracking_mc(
     # ----- draw fps
     cv2.putText(img,
                 'play: %d frame: %d fps: %.2f' % (play_num, frame_id, fps),
-                (0, int(15 * text_scale)),
+                (0, int(20 * text_scale)),
                 cv2.FONT_HERSHEY_PLAIN,
                 2,
                 (0, 255, 255),

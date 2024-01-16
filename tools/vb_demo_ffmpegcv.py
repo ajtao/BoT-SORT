@@ -35,11 +35,15 @@ IMAGE_EXT = [".jpg", ".jpeg", ".webp", ".bmp", ".png"]
 # context manager to help keep track of ranges of time, using NVTX
 @contextlib.contextmanager
 def nvtx_range(msg):
-    depth = torch.cuda.nvtx.range_push(msg)
+    if args.profile:
+        depth = torch.cuda.nvtx.range_push(msg)
+    else:
+        depth = 1
     try:
         yield depth
     finally:
-        torch.cuda.nvtx.range_pop()
+        if args.profile:
+            torch.cuda.nvtx.range_pop()
 
 
 def make_parser():
@@ -52,6 +56,7 @@ def make_parser():
     parser.add_argument("-f", "--exp_file", default=None, type=str, help="pls input your expriment description file")
     parser.add_argument("-c", "--ckpt", default=None, type=str, help="ckpt for eval")
     parser.add_argument("--device", default="cuda", type=str, help="device to run our model, can either be cpu or gpu")
+    parser.add_argument("--profile", action='store_true', help='profile code for speed')
     parser.add_argument("--conf", default=None, type=float, help="test conf")
     parser.add_argument("--nms", default=0.65, type=float, help="test nms threshold")
     parser.add_argument("--tsize", default=None, type=str, help="test img size (w,h)")
@@ -151,7 +156,7 @@ class MyTransformCLS(torch.nn.Module):
         )
 
     def forward(self, img):
-        img_tensor = self.to_tensor(img).cuda()
+        img_tensor = self.to_tensor(img).to(args.device)
         norm_tensor = self.norm(img_tensor)
         input_batch = norm_tensor.unsqueeze(0)
         return input_batch
@@ -203,6 +208,8 @@ class Predictor(object):
             img_info["ratio"] = ratio
             #if self.fp16 and not self.trt:
             #    input = input.half()
+            if self.device == "mps":
+                input = input.to(torch.device("mps"))
 
         with torch.no_grad():
             with nvtx_range('Model'):
@@ -240,21 +247,21 @@ def imageflow_demo(predictor, current_time, args):
     vid_info = run_ffprobe(args.play_vid)
     num_frames = vid_info.num_frames
     fps = vid_info.fps
-    gpu_id = torch.cuda.current_device()
-    logger.info(f'gpu_id {gpu_id}')
-    print(f'\n\ngpu_id {gpu_id}\n\n')
+    if torch.cuda.is_available():
+        gpu_id = torch.cuda.current_device()
+        logger.info(f'gpu_id {gpu_id}')
+        print(f'\n\ngpu_id {gpu_id}\n\n')
     if not args.novid:
-        vid_writer = ffmpegcv.noblock(ffmpegcv.VideoWriterNV,
+        vid_writer = ffmpegcv.noblock(ffmpegcv.VideoWriter,
                                       output_video_path,
                                       codec='hevc',
-                                      # gpu=gpu_id,
                                       fps=fps)
 
     # scale back to original image size
     scale_x = exp.test_size[1] / float(vid_info.width)
     scale_y = exp.test_size[0] / float(vid_info.height)
 
-    ff_reader = ffmpegcv.VideoCaptureNV(
+    ff_reader = ffmpegcv.VideoCapture(
         args.play_vid,
         resize=(exp.test_size[1],
                 exp.test_size[0]),
@@ -381,7 +388,7 @@ def setup_volleyvision(args):
 def main(exp, args):
     if args.trt:
         args.device = "gpu"
-    args.device = torch.device("cuda" if args.device == "gpu" else "cpu")
+    # args.device = torch.device("cuda" if args.device == "gpu" else "cpu")
 
     logger.info("Args: {}".format(args))
 
@@ -392,7 +399,8 @@ def main(exp, args):
     if args.tsize is not None:
         exp.test_size = [int(x) for x in args.tsize.split(',')]
 
-    model = exp.get_model().to(args.device)
+    device = torch.device(args.device)
+    model = exp.get_model().to(device)
     logger.info("Model Summary: {}".format(get_model_info(model, exp.test_size)))
     model.eval()
 
@@ -407,7 +415,7 @@ def main(exp, args):
                           map_location=torch.device(args.device))
         # load the model state dict
         model.load_state_dict(ckpt["model"])
-        model.cuda()
+        # model.to(args.device)
         logger.info("loaded checkpoint done.")
 
     if args.fuse:

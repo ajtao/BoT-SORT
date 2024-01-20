@@ -155,7 +155,7 @@ class MyTransformCLS(torch.nn.Module):
         norm_tensor = self.norm(img_tensor)
         input_batch = norm_tensor.unsqueeze(0)
         return input_batch
-    
+
 
 class Predictor(object):
     def __init__(
@@ -419,8 +419,7 @@ def main(exp, args):
 
     if args.trt:
         assert not args.fuse, "TensorRT model is not support model fusing!"
-        model_dir = f'{cfg.output_root}/ByteTrack/YOLOX_outputs/yolox_x_fullcourt_bs1'
-        trt_file = osp.join(model_dir, "model_trt.pth")
+        trt_file = args.ckpt
         assert osp.exists(
             trt_file
         ), f"TensorRT model {trt_file} is not found!\n Run python3 tools/trt.py first!"

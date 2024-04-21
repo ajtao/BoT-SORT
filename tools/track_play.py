@@ -294,10 +294,10 @@ def setup_volleyvision(args):
     play_dir_basename = osp.basename(osp.dirname(args.play_vid))
 
     if args.tag is not None:
-        result_root = osp.join(cfg.output_root, 'BotSort', args.tag,
+        result_root = osp.join(cfg.output_root2, 'BoT-SORT', args.tag,
                                match_name, play_dir_basename)
     else:
-        result_root = osp.join(cfg.output_root, 'BotSort',
+        result_root = osp.join(cfg.output_root2, 'BoT-SORT',
                                match_name, play_dir_basename)
     os.makedirs(result_root, exist_ok=True)
     setup_logger(result_root, filename="log.log")
@@ -359,10 +359,7 @@ def main(exp, args):
 
     if args.trt:
         assert not args.fuse, "TensorRT model is not support model fusing!"
-        model_dir = ('/mnt/f/output/ByteTrack/YOLOX_outputs/yolox_x_fullcourt_'
-                     'v5bytetrack-with-bad-touches-trt')
-        model_dir = '/mnt/f/output/ByteTrack/YOLOX_outputs/dbg-trt_bs1'
-        trt_file = osp.join(model_dir, "model_trt.pth")
+        trt_file = args.ckpt
         assert osp.exists(
             trt_file
         ), f"TensorRT model {trt_file} is not found!\n Run python3 tools/trt.py first!"

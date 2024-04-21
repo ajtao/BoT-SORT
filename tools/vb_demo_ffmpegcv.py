@@ -23,10 +23,12 @@ from yolox.utils import fuse_model, get_model_info, postprocess, setup_logger
 from yolox.utils.visualize import plot_tracking_mc
 
 from tracker.vball_sort import VbSORT
+from tracker.hybrid_sort import Hybrid_Sort
 from tracker.tracking_utils.timer import Timer
 
 from vtrak.config import cfg
 from vtrak.vball_misc import run_ffprobe, read_play_frames
+from vtrak.track_utils import TrackWriter
 
 
 IMAGE_EXT = [".jpg", ".jpeg", ".webp", ".bmp", ".png"]
@@ -47,6 +49,7 @@ def make_parser():
     parser.add_argument("-expn", "--experiment-name", type=str, default=None)
     parser.add_argument("-n", "--name", type=str, default=None, help="model name")
     parser.add_argument("--path", default="", help="path to images or video")
+    parser.add_argument("--tracker", default="bot-sort", help='can be bot-sort or hybrid-sort')
     parser.add_argument("--plays-json", help='path to ball play frames json')
     parser.add_argument("--camid", type=int, default=0, help="webcam demo camera id")
     parser.add_argument("-f", "--exp_file", default=None, type=str, help="pls input your expriment description file")
@@ -57,6 +60,7 @@ def make_parser():
     parser.add_argument("--tsize", default=None, type=str, help="test img size (w,h)")
     parser.add_argument("--fps", default=30, type=int, help="frame rate (fps)")
     parser.add_argument("--novid", action="store_true", help="Skip output video")
+    parser.add_argument("--write-mot", action="store_true", help="write mot format")
     parser.add_argument("--fp16", dest="fp16", default=False, action="store_true",help="Adopting mix precision evaluating.")
     parser.add_argument("--fuse", dest="fuse", default=False, action="store_true", help="Fuse conv and bn for testing.")
     parser.add_argument("--trt", dest="trt", default=False, action="store_true", help="Using TensorRT model for testing.")
@@ -219,7 +223,10 @@ class Predictor(object):
 
 
 def imageflow_demo(predictor, current_time, args):
-    tracker = VbSORT(args, frame_rate=args.fps)
+    if args.tracker == 'hybrid-sort':
+        tracker = Hybrid_Sort(args, frame_rate=args.fps)
+    else:
+        tracker = VbSORT(args, frame_rate=args.fps)
 
     # ----- class name to class id and class id to class name
     id2cls = defaultdict(str)
@@ -231,6 +238,7 @@ def imageflow_demo(predictor, current_time, args):
     timer = Timer()
 
     # Unified output
+    os.makedirs(args.outdir, exist_ok=True)
     result_filename = os.path.join(args.outdir, 'tracker.csv')
     output_video_path = osp.join(args.outdir, 'tracker.mp4')
 
@@ -247,10 +255,11 @@ def imageflow_demo(predictor, current_time, args):
         vid_writer = ffmpegcv.noblock(ffmpegcv.VideoWriterNV,
                                       output_video_path,
                                       codec='hevc',
-                                      # gpu=gpu_id,
+                                      bitrate='4000k',
                                       fps=fps)
 
     # scale back to original image size
+    native_img_size = [vid_info.width, vid_info.height]
     scale_x = exp.test_size[1] / float(vid_info.width)
     scale_y = exp.test_size[0] / float(vid_info.height)
 
@@ -260,6 +269,10 @@ def imageflow_demo(predictor, current_time, args):
                 exp.test_size[0]),
         resize_keepratio=False)
 
+    raw_reader = ffmpegcv.VideoCaptureNV(args.play_vid)
+    img_dir = osp.join(args.outdir, 'images')
+    os.makedirs(img_dir, exist_ok=True)
+
     my_t = MyTransformCLS()
     my_t = my_t.to(args.device)
     my_t.eval()
@@ -267,28 +280,39 @@ def imageflow_demo(predictor, current_time, args):
     if args.prof:
         torch.cuda.cudart().cudaProfilerStart()
 
-    play_frames = read_play_frames(args.plays_json)
+    if args.plays_json is None or not osp.isfile(args.plays_json):
+        print('WARNING: args.plays_json is invalid, so skipping it')
+        play_frames = None
+    else:
+        play_frames = read_play_frames(args.plays_json)
     pbar = tqdm(total=num_frames, desc='tracking video', mininterval=10)
     fnum = 0
     header = 'frame,id,x1,y1,w,h,play,class,is_jumping,ori_fnum,dx,dy,tlen\n'
     results_wr.write(header)
+    trk_writer = TrackWriter(args.outdir, enabled=args.write_mot)
 
     for image in ff_reader:
         pbar.update()
         fnum += 1
+        image = image.copy()
 
-        if fnum == 1:
-           video_frame_fn = result_filename.replace('csv', 'png')
-           print(f'Native video resolution w,h = {vid_info.width},{vid_info.height}, '
-                 f'scale={scale_x:2.2f},{scale_y:2.2f}')
-           print(f'Inference image shape {image.shape}')
-           cv2.imwrite(video_frame_fn, image)
+        _, raw_img = raw_reader.read()
+        raw_img = raw_img.copy()
 
-        if fnum not in play_frames:
+        if fnum == 1000:
+            print(f'Native video resolution w,h = {vid_info.width},{vid_info.height}, '
+                  f'scale={scale_x:2.2f},{scale_y:2.2f}')
+            print(f'Inference image shape {image.shape}')
+            video_frame_fn = osp.join(args.outdir, f'{args.match_name}.png')
+            cv2.imwrite(video_frame_fn, image)
+
+        if not play_frames:
+            play = 0
+        elif fnum not in play_frames:
             continue
         else:
             play = play_frames[fnum]
-        
+
         with torch.no_grad():
             sample = my_t(image)
             # image (h, w, c) ndarray
@@ -304,8 +328,12 @@ def imageflow_demo(predictor, current_time, args):
                 outputs = outputs[0].cpu().numpy()
                 detections = outputs[:, :7]
                 # Scale to native image size
-                detections[:, :4] /= np.array([scale_x, scale_y, scale_x, scale_y])
-                online_targets = tracker.update(detections, image)
+                if args.tracker == 'hybrid-sort':
+                    online_targets = tracker.update(outputs, native_img_size, exp.test_size)
+                else:
+                    # scale detection back to native video resolution before passing to tracker
+                    detections[:, :4] /= np.array([scale_x, scale_y, scale_x, scale_y])
+                    online_targets = tracker.update(detections, raw_img)
 
             with nvtx_range('results-wr'):
                 online_tlwhs = []
@@ -314,6 +342,7 @@ def imageflow_demo(predictor, current_time, args):
                 online_jumping = []
                 online_nearfar = []
                 for trk in online_targets:
+                    trk_writer.write(trk, fnum)
                     tlwh = trk.tlwh
                     tid = trk.track_id
                     dxdy = trk.dxdy
@@ -326,8 +355,11 @@ def imageflow_demo(predictor, current_time, args):
                                    f'{dxdy[0]:.4f},{dxdy[1]:.4f},{tlen:.4f}\n')
                         results_wr.write(csv_str)
 
-                        tlwh = tlwh * np.array([scale_x, scale_y, scale_x, scale_y])
-                        dxdy = dxdy * np.array([scale_x, scale_y])
+                        if args.tracker == 'hybrid-sort':
+                            pass
+                        else:
+                            tlwh = tlwh * np.array([scale_x, scale_y, scale_x, scale_y])
+                            dxdy = dxdy * np.array([scale_x, scale_y])
                         online_tlwhs.append(tlwh)
                         online_ids.append(tid)
                         online_scores.append(trk.score)
@@ -357,11 +389,15 @@ def imageflow_demo(predictor, current_time, args):
             timer.toc()
             online_im = image
 
+        if args.write_mot:
+            img_fn = osp.join(img_dir, f'{fnum:06d}.jpg')
+            cv2.imwrite(img_fn, raw_img)
+
         if not args.novid:
             with nvtx_range('wr-vid'):
                 vid_writer.write(online_im)
 
-
+    trk_writer.finish()
     logger.info(f"Saved tracking results to {result_filename}")
 
 

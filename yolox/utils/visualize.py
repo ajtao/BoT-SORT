@@ -5,6 +5,9 @@
 import cv2
 import numpy as np
 
+from vtrak.vball_misc import draw_text_with_background
+
+
 __all__ = ["vis"]
 
 
@@ -78,63 +81,42 @@ def plot_tracking_mc(
     img = np.ascontiguousarray(np.copy(image))
     im_h, im_w = img.shape[:2]
     text_scale = max(1.0, image.shape[1] / 1000.0)  # 1600.
-    text_thickness = 2
     line_thickness = max(1, int(image.shape[1] / 500.0))
 
     # ----- draw fps
-    cv2.putText(img,
-                'play: %d frame: %d fps: %.2f' % (play_num, frame_id, fps),
-                (0, int(20 * text_scale)),
-                cv2.FONT_HERSHEY_PLAIN,
-                2,
-                (0, 255, 255),
-                thickness=2)
+    draw_text_with_background(
+        label=f'play: {play_num} frame: {frame_id}',
+        vid_img=img,
+        text_scale=2,
+        pos=(0, int(20 * text_scale))
+    )
 
     for idx, tlwh_i in enumerate(tlwhs):
         is_jumping = jumping[idx]
         obj_id = int(obj_ids[idx])
-        try:
-            cls_str = nearfar_dict[nearfar[idx]]
-        except:
-            import pdb; pdb.set_trace()
+        cls_str = nearfar_dict[nearfar[idx]]
         x1, y1, w, h = tlwh_i
         int_box = tuple(map(int, (x1, y1, x1 + w, y1 + h)))  # x1, y1, x2, y2
         if is_jumping:
-            player_txt_color = (0, 0, 255)
             cls_str += '-jump'
-        else:
-            player_txt_color = (0, 255, 255)
-        tr_id_text = '{}'.format(int(obj_id))
+        tr_id_text = f'{obj_id}: {cls_str}'
         color = get_color(abs(obj_id))
 
-        # draw bbox
-        cv2.rectangle(img=img,
-                      pt1=int_box[0:2],  # (x1, y1)
-                      pt2=int_box[2:4],  # (x2, y2)
-                      color=color,
-                      thickness=line_thickness)
-
-        # draw class name
-        cv2.putText(img,
-                    cls_str,
-                    (int(x1), int(y1)),
-                    cv2.FONT_HERSHEY_PLAIN,
-                    text_scale,
-                    player_txt_color,
-                    thickness=text_thickness)
-
-        txt_w, txt_h = cv2.getTextSize(cls_str,
-                                       fontFace=cv2.FONT_HERSHEY_PLAIN,
-                                       fontScale=text_scale, thickness=text_thickness)
-
+        cv2.rectangle(img, int_box[0:2], int_box[2:4], color=color, thickness=line_thickness)
+        (txt_w, txt_h), _ = cv2.getTextSize(
+            tr_id_text, cv2.FONT_HERSHEY_PLAIN, text_scale, 1)
         # draw track id
-        cv2.putText(img,
-                    tr_id_text,
-                    (int(x1), int(y1) - txt_h),
-                    cv2.FONT_HERSHEY_PLAIN,
-                    text_scale * 1.2,
-                    player_txt_color,
-                    thickness=text_thickness)
+        if 'near' in cls_str:
+            txt_y = int(y1 + h + 5)
+        else:
+            txt_y = int(y1 - txt_h - 5)
+        draw_text_with_background(
+            label=tr_id_text,
+            vid_img=img,
+            text_scale=1,
+            pos=(int(x1), txt_y),
+            text_color=(196, 0, 0),
+        )
 
     return img
 

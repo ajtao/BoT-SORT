@@ -317,7 +317,6 @@ class VbSORT(object):
         self.appearance_thresh = args.appearance_thresh
 
         if args.with_reid:
-            print(f'USING REID!')
             self.encoder = FastReIDInterface(args.fast_reid_config, args.fast_reid_weights,
                                              args.device)
 

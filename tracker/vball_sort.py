@@ -8,6 +8,16 @@ from tracker.kalman_filter import KalmanFilter
 from fast_reid.fast_reid_interfece import FastReIDInterface
 
 
+full_to_simple = {
+    'near': 'near',
+    'near-nojump': 'near',
+    'near-jump': 'near',
+    'far': 'far',
+    'far-nojump': 'far',
+    'far-jump': 'far',
+    'ball': 'ball',
+}
+
 full_class_ids = {'near': 0,
                   'near-jump': 1,
                   'far': 2,
@@ -349,7 +359,7 @@ class VbSORT(object):
                 raise
 
             if frame_print is not None:
-                print(f'frame_id,x1,y1,x2,y2,nearfar,score')
+                print('frame_id,x1,y1,x2,y2,nearfar,score')
             classes = np.copy(full_classes)
             jumping = np.copy(full_classes)
             for idx in range(output_results.shape[0]):
@@ -390,6 +400,11 @@ class VbSORT(object):
             scores_keep = []
             classes_keep = []
             jumping_keep = []
+
+        raw_dets = {'bboxes': bboxes,
+                    'scores': scores,
+                    'classes': classes,
+                    'jumping': jumping}
 
         '''Extract embeddings '''
         # assert self.args.with_reid, f'VbSORT requires reid for now'
@@ -555,7 +570,7 @@ class VbSORT(object):
         # output_stracks = [track for track in self.tracked_stracks if track.is_activated]
         output_stracks = [track for track in self.tracked_stracks]
 
-        return output_stracks
+        return output_stracks, raw_dets
 
 
 def joint_stracks(tlista, tlistb):

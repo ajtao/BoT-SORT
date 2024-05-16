@@ -27,8 +27,12 @@ from tracker.hybrid_sort import Hybrid_Sort
 from tracker.tracking_utils.timer import Timer
 
 from vtrak.config import cfg
-from vtrak.vball_misc import run_ffprobe, read_play_frames
+from vtrak.vball_misc import run_ffprobe, read_play_frames, safe_vid_rd
 from vtrak.track_utils import TrackWriter
+
+# yolov7 ... terrible namespace names
+from models.experimental import attempt_load
+from utils.general import non_max_suppression, yolov7_preproc, letterbox
 
 
 IMAGE_EXT = [".jpg", ".jpeg", ".webp", ".bmp", ".png"]
@@ -222,7 +226,28 @@ class Predictor(object):
         return outputs, img_info
 
 
-def imageflow_demo(predictor, current_time, args):
+def inference_img_yolov7(model, sample, test_size):
+    preprocessed = yolov7_preproc(sample, img_size=test_size, device=args.device)
+    # preprocessed = (bs, 3, h, w)
+    with torch.no_grad():
+        pred = model(preprocessed)[0]
+    # pred = (bs, N, 16)
+
+    """
+    best:      0.1, 0.70
+    also worse 0.1, 0.65
+    worse      0.3, 0.65
+    """
+    pred = non_max_suppression(pred,
+                               conf_thres=.1,
+                               iou_thres=0.7,
+                               classes=None,
+                               agnostic=True)
+    # pred[bs] = tensor(N, bbox), bbox=(x1, y1, x2, y2, score, cls_idx)
+    return pred
+
+
+def imageflow_demo(predictor, current_time, args, exp):
     if args.tracker == 'hybrid-sort':
         tracker = Hybrid_Sort(args, frame_rate=args.fps)
     else:
@@ -263,11 +288,22 @@ def imageflow_demo(predictor, current_time, args):
     scale_x = exp.test_size[1] / float(vid_info.width)
     scale_y = exp.test_size[0] / float(vid_info.height)
 
+    """
     ff_reader = ffmpegcv.VideoCaptureNV(
         args.play_vid,
         resize=(exp.test_size[1],
                 exp.test_size[0]),
         resize_keepratio=False)
+    """
+    detector = 'yolov7'
+    if detector == 'yolov7':
+        pix_fmt = 'rgb24'
+    else:
+        pix_fmt = None
+    ff_reader = safe_vid_rd(args.play_vid,
+                            resize=(exp.test_size[1],
+                                    exp.test_size[0]),
+                            pix_fmt=pix_fmt)
 
     raw_reader = ffmpegcv.VideoCaptureNV(args.play_vid)
     img_dir = osp.join(args.outdir, 'images')
@@ -276,6 +312,12 @@ def imageflow_demo(predictor, current_time, args):
     my_t = MyTransformCLS()
     my_t = my_t.to(args.device)
     my_t.eval()
+
+    if detector == 'yolov7':
+        ckpt = '/mnt/h/output/trn/yolov7/players-v9/weights/last.pt'
+        yolov7_model = attempt_load(ckpt, map_location=torch.device(args.device))
+        yolov7_model.half()
+        yolov7_model.eval()
 
     if args.prof:
         torch.cuda.cudart().cudaProfilerStart()
@@ -313,19 +355,19 @@ def imageflow_demo(predictor, current_time, args):
         else:
             play = play_frames[fnum]
 
-        with torch.no_grad():
-            sample = my_t(image)
-            # image (h, w, c) ndarray
-
         # Detect objects
         with nvtx_range('infer'):
-            outputs, img_info = predictor.inference(sample, timer)
-            dets = outputs[0]
-            # torch.Size([15, 7])
-            # x1, y1, x2, y1 = dets[:4]
-            # score = dets[4]
-            # cls = dets[6]
+            if detector == 'yolox':
+                with torch.no_grad():
+                    sample = my_t(image)
+                    # image (h, w, c) ndarray
+                outputs, _ = predictor.inference(sample, timer)
+                dets = outputs[0]
+            elif detector == 'yolov7':
+                outputs = inference_img_yolov7(yolov7_model, image, exp.test_size)
+                dets = outputs[0]
 
+        image_bgr = cv2.cvtColor(image, cv2.COLOR_RGB2BGR)
         if dets is not None:
             with nvtx_range('trk-update'):
                 # scale bbox predictions according to image size
@@ -390,7 +432,7 @@ def imageflow_demo(predictor, current_time, args):
             if not args.novid:
                 with nvtx_range('plot'):
                     online_im = plot_tracking_mc(
-                        image=image,
+                        image=image_bgr,
                         tlwhs=online_tlwhs,
                         obj_ids=online_ids,
                         jumping=online_jumping,
@@ -402,7 +444,7 @@ def imageflow_demo(predictor, current_time, args):
                     )
         else:
             timer.toc()
-            online_im = image
+            online_im = image_bgr
 
         if args.write_mot:
             img_fn = osp.join(img_dir, f'{fnum:06d}.jpg')
@@ -484,7 +526,7 @@ def main(exp, args):
     predictor = Predictor(model, exp, trt_file, decoder, args.device, args.fp16)
     current_time = time.localtime()
     with nvtx_range('vid-loop'):
-        imageflow_demo(predictor, current_time, args)
+        imageflow_demo(predictor, current_time, args, exp)
 
 
 if __name__ == "__main__":

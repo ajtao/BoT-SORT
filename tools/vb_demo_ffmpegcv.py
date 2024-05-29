@@ -270,8 +270,9 @@ def imageflow_demo(predictor, current_time, args):
         resize_keepratio=False)
 
     raw_reader = ffmpegcv.VideoCaptureNV(args.play_vid)
-    img_dir = osp.join(args.outdir, 'images')
-    os.makedirs(img_dir, exist_ok=True)
+    if args.write_mot:
+        img_dir = osp.join(args.outdir, 'images')
+        os.makedirs(img_dir, exist_ok=True)
 
     my_t = MyTransformCLS()
     my_t = my_t.to(args.device)

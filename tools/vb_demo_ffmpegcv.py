@@ -59,7 +59,7 @@ def make_parser():
     parser.add_argument("--nms", default=0.65, type=float, help="test nms threshold")
     parser.add_argument("--tsize", default=None, type=str, help="test img size (w,h)")
     parser.add_argument("--fps", default=30, type=int, help="frame rate (fps)")
-    parser.add_argument("--novid", action="store_true", help="Skip output video")
+    parser.add_argument("--save-vid", action="store_true", help="write output video")
     parser.add_argument("--write-mot", action="store_true", help="write mot format")
     parser.add_argument("--fp16", dest="fp16", default=False, action="store_true",help="Adopting mix precision evaluating.")
     parser.add_argument("--fuse", dest="fuse", default=False, action="store_true", help="Fuse conv and bn for testing.")
@@ -251,7 +251,7 @@ def imageflow_demo(predictor, current_time, args):
     gpu_id = torch.cuda.current_device()
     logger.info(f'gpu_id {gpu_id}')
     print(f'\n\ngpu_id {gpu_id}\n\n')
-    if not args.novid:
+    if args.save_vid:
         vid_writer = ffmpegcv.noblock(ffmpegcv.VideoWriterNV,
                                       output_video_path,
                                       codec='hevc',
@@ -388,7 +388,7 @@ def imageflow_demo(predictor, current_time, args):
                         dets_wr.write(dets_str)
 
             timer.toc()
-            if not args.novid:
+            if args.save_vid:
                 with nvtx_range('plot'):
                     online_im = plot_tracking_mc(
                         image=image,
@@ -409,7 +409,7 @@ def imageflow_demo(predictor, current_time, args):
             img_fn = osp.join(img_dir, f'{fnum:06d}.jpg')
             cv2.imwrite(img_fn, raw_img)
 
-        if not args.novid:
+        if args.save_vid:
             with nvtx_range('wr-vid'):
                 vid_writer.write(online_im)
 

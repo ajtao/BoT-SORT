@@ -58,7 +58,10 @@ def postprocess(prediction, num_classes, conf_thre=0.7, nms_thre=0.45,
 
         if agnostic:
             saved_classes = detections[:, 6]
-            classes = torch.zeros_like(saved_classes, device=saved_classes.get_device())
+            if saved_classes.get_device() == -1:
+                classes = torch.zeros_like(saved_classes)
+            else:
+                classes = torch.zeros_like(saved_classes, device=saved_classes.get_device())
         else:
             classes = detections[:, 6]
 

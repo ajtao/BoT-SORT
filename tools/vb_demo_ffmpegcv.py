@@ -64,6 +64,7 @@ def make_parser():
     parser.add_argument("--fp16", dest="fp16", default=False, action="store_true",help="Adopting mix precision evaluating.")
     parser.add_argument("--fuse", dest="fuse", default=False, action="store_true", help="Fuse conv and bn for testing.")
     parser.add_argument("--trt", dest="trt", default=False, action="store_true", help="Using TensorRT model for testing.")
+    parser.add_argument("--det-thr", default=0, help='thresh for detection file')
 
     # tracking args
     parser.add_argument("--track_high_thresh", type=float, default=0.5, help="tracking confidence threshold")
@@ -213,12 +214,14 @@ class Predictor(object):
                 timer.tic()
                 with autocast(enabled=args.fp16):
                     outputs = self.model(input)
-
+                    # torch.Size([1, 23625, 10])
             with nvtx_range('decode'):
                 if self.decoder is not None:
                     outputs = self.decoder(outputs, dtype=outputs.type())
+                    # torch.Size([1, 23625, 10])
             with nvtx_range('post'):
                 outputs = postprocess(outputs, self.num_classes, self.confthre, self.nmsthre, agnostic=True)
+                # torch.Size([16, 7])
         return outputs, img_info
 
 
@@ -315,8 +318,9 @@ def imageflow_demo(predictor, current_time, args):
             play = play_frames[fnum]
 
         with torch.no_grad():
+            # image shape = (h, w, c)
             sample = my_t(image)
-            # image (h, w, c) ndarray
+            # sample shape = (1, c, h, w)
 
         # Detect objects
         with nvtx_range('infer'):
@@ -325,7 +329,7 @@ def imageflow_demo(predictor, current_time, args):
             # torch.Size([15, 7])
             # x1, y1, x2, y1 = dets[:4]
             # score = dets[4]
-            # cls = dets[6]
+            # cls = dets[5:6]
 
         if dets is not None:
             with nvtx_range('trk-update'):
@@ -383,7 +387,7 @@ def imageflow_demo(predictor, current_time, args):
                     h = y2 - y1
                     cls = int(cls)
                     jumping = int(jumping)
-                    if score >= 0.3:
+                    if score >= args.det_thr:
                         dets_str = (f'{fnum},-1,{x1},{y1},{w},{h},{score:0.2f},{play},{cls},{jumping}\n')
                         dets_wr.write(dets_str)
 

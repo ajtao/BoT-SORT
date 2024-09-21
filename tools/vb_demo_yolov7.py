@@ -305,17 +305,23 @@ def imageflow_demo(predictor, current_time, args, exp):
                                     exp.test_size[0]),
                             pix_fmt=pix_fmt)
 
-    raw_reader = ffmpegcv.VideoCaptureNV(args.play_vid)
+    raw_reader = ffmpegcv.VideoCapture(args.play_vid)
     img_dir = osp.join(args.outdir, 'images')
-    os.makedirs(img_dir, exist_ok=True)
+    if args.write_mot:
+        os.makedirs(img_dir, exist_ok=True)
 
     my_t = MyTransformCLS()
     my_t = my_t.to(args.device)
     my_t.eval()
 
     if detector == 'yolov7':
+        """
         ckpt = '/mnt/h/output/trn/yolov7/players-v9/weights/last.pt'
-        yolov7_model = attempt_load(ckpt, map_location=torch.device(args.device))
+        ckpt = '/mnt/h/output/trn/yolov7/players-v7x-12ep/weights/last.pt'
+        ckpt = '/mnt/h/output/trn/yolov7/players/players-v7x-scale2/weights/last.pt'
+        ckpt = '/mnt/h/output/trn/yolov7/players/players-v7x-scale-14404/weights/last.pt'
+        """
+        yolov7_model = attempt_load(args.ckpt, map_location=torch.device(args.device))
         yolov7_model.half()
         yolov7_model.eval()
 
@@ -338,8 +344,11 @@ def imageflow_demo(predictor, current_time, args, exp):
         fnum += 1
         image = image.copy()
 
-        _, raw_img = raw_reader.read()
-        raw_img = raw_img.copy()
+        try:
+            _, raw_img = raw_reader.read()
+            raw_img = raw_img.copy()
+        except:
+            breakpoint()
 
         if fnum == 1000:
             print(f'Native video resolution w,h = {vid_info.width},{vid_info.height}, '
@@ -489,6 +498,7 @@ def main(exp, args):
     logger.info("Model Summary: {}".format(get_model_info(model, exp.test_size)))
     model.eval()
 
+    """
     if not args.trt:
         if args.ckpt is None:
             ckpt_file = osp.join(args.outdir, "best_ckpt.pth.tar")
@@ -524,9 +534,10 @@ def main(exp, args):
         decoder = None
 
     predictor = Predictor(model, exp, trt_file, decoder, args.device, args.fp16)
-    current_time = time.localtime()
     with nvtx_range('vid-loop'):
-        imageflow_demo(predictor, current_time, args, exp)
+    """
+    current_time = time.localtime()
+    imageflow_demo(None, current_time, args, exp)
 
 
 if __name__ == "__main__":

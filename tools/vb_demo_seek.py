@@ -2,7 +2,9 @@ import argparse
 import os
 import os.path as osp
 import time
+import csv
 import json
+from queue import Queue
 from collections import defaultdict
 
 import contextlib
@@ -23,12 +25,12 @@ from yolox.utils import fuse_model, get_model_info, postprocess, setup_logger
 from yolox.utils.visualize import plot_tracking_mc
 
 from tracker.vball_sort import VbSORT
-from tracker.hybrid_sort import Hybrid_Sort
 from tracker.tracking_utils.timer import Timer
 
 from vtrak.config import cfg
 from vtrak.vball_misc import run_ffprobe, read_play_frames, VidRdSeek
 from vtrak.track_utils import TrackWriter
+from vtrak.yolox_utils import Predictor
 
 
 IMAGE_EXT = [".jpg", ".jpeg", ".webp", ".bmp", ".png"]
@@ -49,12 +51,12 @@ def make_parser():
     parser.add_argument("-expn", "--experiment-name", type=str, default=None)
     parser.add_argument("-n", "--name", type=str, default=None, help="model name")
     parser.add_argument("--path", default="", help="path to images or video")
-    parser.add_argument("--tracker", default="bot-sort", help='can be bot-sort or hybrid-sort')
+    parser.add_argument("--tracker", default="bot-sort", help='deprecated')
     parser.add_argument("--plays-json", help='path to ball play frames json')
     parser.add_argument("--camid", type=int, default=0, help="webcam demo camera id")
     parser.add_argument("-f", "--exp_file", default=None, type=str, help="pls input your expriment description file")
     parser.add_argument("-c", "--ckpt", default=None, type=str, help="ckpt for eval")
-    parser.add_argument("--device", default="cuda", type=str, help="device to run our model, can either be cpu or gpu")
+    parser.add_argument("--device_name", default="cuda", type=str, help="device to run our model, can either be cpu or gpu")
     parser.add_argument("--conf", default=None, type=float, help="test conf")
     parser.add_argument("--nms", default=0.65, type=float, help="test nms threshold")
     parser.add_argument("--tsize", default=None, type=str, help="test img size (w,h)")
@@ -162,75 +164,146 @@ class MyTransformCLS(torch.nn.Module):
         return input_batch
 
 
-class Predictor(object):
-    def __init__(
-        self,
-        model,
-        exp,
-        trt_file=None,
-        decoder=None,
-        device=torch.device("cpu"),
-        fp16=False
-    ):
-        self.model = model
-        self.decoder = decoder
-        self.num_classes = exp.num_classes
-        self.confthre = exp.test_conf
-        self.nmsthre = exp.nmsthre
-        self.test_size = exp.test_size
-        print(f'BotSORT preproc test size {self.test_size}')
-        print(f'BotSORT postproc conf_thresh {self.confthre}, nms thresh {self.nmsthre}')
-        self.device = device
-        self.fp16 = fp16
-        self.trt = trt_file is not None
-        if trt_file is not None:
-            from torch2trt import TRTModule
-
-            model_trt = TRTModule()
-            model_trt.load_state_dict(torch.load(trt_file))
-
-            x = torch.ones((1, 3, exp.test_size[0], exp.test_size[1]), device=device)
-            if self.fp16:
-                x = x.half()
-            self.model(x)
-            self.model = model_trt
-        self.rgb_means = (0.485, 0.456, 0.406)
-        self.std = (0.229, 0.224, 0.225)
-
-    def inference(self, input, timer):
-        img_info = {"id": 0}
-        img_info["file_name"] = None
-        with nvtx_range('infer1'):
-            height, width = input.shape[:2]
-            img_info["height"] = height
-            img_info["width"] = width
-            ratio = min(self.test_size[0] / input.shape[0], self.test_size[1] / input.shape[1])
-            img_info["ratio"] = ratio
-            #if self.fp16 and not self.trt:
-            #    input = input.half()
-
-        with torch.no_grad():
-            with nvtx_range('Model'):
-                timer.tic()
-                with autocast(enabled=args.fp16):
-                    outputs = self.model(input)
-                    # torch.Size([1, 23625, 10])
-            with nvtx_range('decode'):
-                if self.decoder is not None:
-                    outputs = self.decoder(outputs, dtype=outputs.type())
-                    # torch.Size([1, 23625, 10])
-            with nvtx_range('post'):
-                outputs = postprocess(outputs, self.num_classes, self.confthre, self.nmsthre, agnostic=True)
-                # torch.Size([16, 7])
-        return outputs, img_info
-
-
-def imageflow_demo(predictor, current_time, args, num_classes):
-    if args.tracker == 'hybrid-sort':
-        tracker = Hybrid_Sort(args, frame_rate=args.fps)
+def separate_corners(detections, num_classes):
+    """
+    Strip corner boxes out of the detections since the player tracker doesn't care about them.
+    """
+    # These classes must match category order in the player detection dataset json
+    if num_classes == 7:
+        cls_name = [
+            "near_nojump",
+            "near_jump",
+            "far_nojump",
+            "far_jump",
+            "upper",
+            "mid",
+            "lower"
+        ]
+    elif num_classes == 5:
+        cls_name = [
+            "near_nojump",
+            "near_jump",
+            "far_nojump",
+            "far_jump",
+            "ball"
+        ]
+        pass
     else:
-        tracker = VbSORT(args, num_classes=num_classes,
-                         frame_rate=args.fps)
+        raise
+
+    # expect this format for detection output:
+    #   detections[:4] -> bboxes
+    #   detections[4:6] = scores
+    #   detections[6] = full class
+    assert len(detections[0]) == 7  # yolox output
+    corner_classes = ['upper', 'mid', 'lower']
+    corners = {}
+    players = []
+    for det in detections:
+        cls = int(det[6])
+        if cls_name[cls] in corner_classes:
+            corners[cls_name[cls]] = det
+        elif cls_name[cls] == 'ball':
+            continue
+        elif 'near' in cls_name[cls] or 'far' in cls_name[cls]:
+            # tracker should only see player classes now
+            players.append(det)
+        else:
+            raise
+
+    if len(players):
+        players = np.stack(players)
+
+    return players, corners
+
+
+class CornerWriter():
+    # Write court corners out, average over a window of the last 30 observations
+    def __init__(self, out_fn, img_w, fps, det_thr=0.6, avg_window=30):
+        fp = open(out_fn, 'w')
+        self.writer = csv.writer(fp)
+        self.mid_x = img_w // 2
+        self.fps = int(fps)
+        self.det_thr = det_thr
+        self.writer.writerow(['fnum', 'ul_x', 'ul_y', 'ml_x', 'ml_y', 'ur_x', 'ur_y', 'mr_x', 'mr_y'])
+        self.qs = {}
+        self.q_names = ['left', 'right']
+        for q_name in self.q_names:
+            self.qs[q_name] = Queue(maxsize=avg_window)
+
+    def update(self, fnum, corners):
+        # Update the queue every fnum, but only write a new corner every second,
+        # to save on filesize and also we don't need that level of precision
+        for _cls, det in corners.items():
+            if _cls != 'upper':
+                continue
+            bbox = det[:4]
+            score = det[5] * det[6]
+            if score < self.det_thr:
+                # discard low confidence corners
+                continue
+            assert len(det) == 7  # yolox
+
+            # assign corner side based on heuristic
+            x1, y1, x2, y2 = bbox
+            if x1 >= self.mid_x:
+                cls = 'right'
+            else:
+                cls = 'left'
+            assert cls in self.qs
+            if self.qs[cls].full():
+                self.qs[cls].get()
+            self.qs[cls].put(bbox)
+
+        if not np.all(np.array([q.qsize() for q in self.qs.values()])):
+            # don't write out corner unless we have entries in all queues
+            return
+
+        if fnum % self.fps != 0:
+            # only write out on second boundary
+            return
+
+        # Compute average bboxes across time window
+        means = {}
+        for q_name in self.q_names:
+            # calculate mean coordinates across window
+            vals = list(self.qs[q_name].queue)
+            means[q_name] = np.mean(np.stack(vals), axis=0).astype(np.int32)
+
+        # Court:
+        #         +==============+
+        #        /     court      \
+        #       /     far side     \
+        #      /                    \
+        #     +======================+
+        #    /        court           \
+        #   /       near side          \
+        #  /                            \
+        # +==============================+
+        #
+        # Upper corner bboxes to court coordinates:
+        #        ul              ur
+        #     +---+===============+---+
+        #     |  /|               |\  |
+        #     | / |               | \ |
+        #     |/  |               |  \|
+        #  ml +===+===============+===+ mr
+        #    /                         \
+        #   /                           \
+
+        row = [fnum]
+        x1, y1, x2, y2 = means['left']
+        row.extend([x2, y1])  # ul
+        row.extend([x1, y2])  # ml
+        x1, y1, x2, y2 = means['right']
+        row.extend([x1, y1])  # ur
+        row.extend([x2, y2])  # mr
+
+        self.writer.writerow(row)
+
+
+def imageflow_demo(predictor, current_time, args, exp):
+    tracker = VbSORT(args, frame_rate=args.fps)
 
     # ----- class name to class id and class id to class name
     id2cls = defaultdict(str)
@@ -250,7 +323,6 @@ def imageflow_demo(predictor, current_time, args, num_classes):
     results_wr = open(result_filename, 'w')
 
     vid_info = run_ffprobe(args.play_vid)
-    num_frames = vid_info.num_frames
     fps = vid_info.fps
     gpu_id = torch.cuda.current_device()
     logger.info(f'gpu_id {gpu_id}')
@@ -292,6 +364,9 @@ def imageflow_demo(predictor, current_time, args, num_classes):
     header = 'frame,id,x1,y1,w,h,play,class,is_jumping,ori_fnum,dx,dy,tlen\n'
     results_wr.write(header)
     trk_writer = TrackWriter(args.outdir, enabled=args.write_mot)
+    corner_fn = osp.join(args.outdir, 'corners.csv')
+    corner_writer = CornerWriter(corner_fn, vid_info.width, vid_info.fps,
+                                 args.det_thr)
 
     for fnum, raw_img in vid_rd:
         image = cv2.resize(raw_img, (exp.test_size[1],
@@ -308,36 +383,44 @@ def imageflow_demo(predictor, current_time, args, num_classes):
         if not play_frames:
             play = 0
         elif fnum not in play_frames:
+            raise
             continue
         else:
             play = play_frames[fnum]
 
         with torch.no_grad():
             # image shape = (h, w, c)
-            sample = my_t(image)
             # sample shape = (1, c, h, w)
+            sample = my_t(image)
 
-        # Detect objects
+        # Run detector
         with nvtx_range('infer'):
             outputs, img_info = predictor.inference(sample, timer)
-            dets = outputs[0]
-            # torch.Size([15, 7])
-            # x1, y1, x2, y1 = dets[:4]
-            # score = dets[4]
-            # cls = dets[5:6]
 
-        if dets is not None:
+        if outputs[0] is None:
+            corners = []
+            img_dets = []
+        else:
+            outputs = outputs[0].cpu().numpy()
+
+            # yolox output:
+            #   [:4] -> bboxes
+            #   [4:6] = scores
+            #   [6] = full class
+            detections = outputs[:, :7]
+
+            # Scale detection back to native video resolution before passing to tracker
+            detections[:, :4] /= np.array([scale_x, scale_y, scale_x, scale_y])
+
+            # Separate out corners so that tracker only see people
+            img_dets, corners = separate_corners(detections, exp.num_classes)
+
+        if len(corners):
+            corner_writer.update(fnum, corners)
+
+        if len(img_dets):
             with nvtx_range('trk-update'):
-                # scale bbox predictions according to image size
-                outputs = outputs[0].cpu().numpy()
-                detections = outputs[:, :7]
-                # Scale to native image size
-                if args.tracker == 'hybrid-sort':
-                    online_targets = tracker.update(outputs, native_img_size, exp.test_size)
-                else:
-                    # scale detection back to native video resolution before passing to tracker
-                    detections[:, :4] /= np.array([scale_x, scale_y, scale_x, scale_y])
-                    online_targets, raw_dets = tracker.update(detections, raw_img)
+                online_targets, raw_dets = tracker.update(img_dets, raw_img)
 
             with nvtx_range('results-wr'):
                 online_tlwhs = []
@@ -345,7 +428,7 @@ def imageflow_demo(predictor, current_time, args, num_classes):
                 online_scores = []
                 online_jumping = []
                 online_nearfar = []
-                for trk in online_targets:
+                for idx, trk in enumerate(online_targets):
                     trk_writer.write(trk, fnum)
                     tlwh = trk.tlwh
                     tid = trk.track_id
@@ -359,12 +442,9 @@ def imageflow_demo(predictor, current_time, args, num_classes):
                                    f'{dxdy[0]:.4f},{dxdy[1]:.4f},{tlen:.4f}\n')
                         results_wr.write(csv_str)
 
-                        if args.tracker == 'hybrid-sort':
-                            pass
-                        else:
-                            # scale down to inference resolution in order to visualize
-                            tlwh = tlwh * np.array([scale_x, scale_y, scale_x, scale_y])
-                            dxdy = dxdy * np.array([scale_x, scale_y])
+                        # scale down to inference resolution in order to visualize
+                        tlwh = tlwh * np.array([scale_x, scale_y, scale_x, scale_y])
+                        dxdy = dxdy * np.array([scale_x, scale_y])
                         online_tlwhs.append(tlwh)
                         online_ids.append(tid)
                         online_scores.append(trk.score)
@@ -395,7 +475,7 @@ def imageflow_demo(predictor, current_time, args, num_classes):
                         obj_ids=online_ids,
                         jumping=online_jumping,
                         nearfar=online_nearfar,
-                        num_classes=tracker.num_classes,
+                        num_classes=4,  # FIXME tracker.num_classes,
                         frame_id=fnum,
                         fps=1. / timer.average_time,
                         play_num=play,
@@ -431,8 +511,10 @@ def setup_volleyvision(args):
 
 def main(exp, args):
     if args.trt:
-        args.device = "gpu"
-    args.device = torch.device("cuda" if args.device == "gpu" else "cpu")
+        args.device_name = "gpu"
+    args.device_name = "cuda" if (args.device_name == "gpu" or
+                                  args.device_name == 'cuda') else "cpu"
+    args.device = torch.device(args.device_name)
 
     logger.info("Args: {}".format(args))
 
@@ -454,8 +536,8 @@ def main(exp, args):
             ckpt_file = args.ckpt
         logger.info("loading checkpoint")
         ckpt = torch.load(ckpt_file,
-                          # map_location="cpu")
-                          map_location=torch.device(args.device))
+                          weights_only=False,
+                          map_location=args.device)
         # load the model state dict
         model.load_state_dict(ckpt["model"])
         model.cuda()
@@ -481,16 +563,15 @@ def main(exp, args):
         trt_file = None
         decoder = None
 
-    predictor = Predictor(model, exp, trt_file, decoder, args.device, args.fp16)
+    predictor = Predictor(model, exp, trt_file, decoder, args.device_name, args.fp16)
     current_time = time.localtime()
     with nvtx_range('vid-loop'):
-        imageflow_demo(predictor, current_time, args, exp.num_classes)
+        imageflow_demo(predictor, current_time, args, exp)
 
 
 if __name__ == "__main__":
     args = make_parser().parse_args()
     exp = get_exp(args.exp_file, args.name)
-
     args.ablation = False
     args.mot20 = not args.fuse_score
 

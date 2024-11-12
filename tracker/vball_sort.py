@@ -343,9 +343,6 @@ class VbSORT(object):
         lost_stracks = []
         removed_stracks = []
 
-        #if self.frame_id == 22:
-        #    breakpoint()
-
         if len(output_results):
             bboxes = output_results[:, :4]
             scores = output_results[:, 4]

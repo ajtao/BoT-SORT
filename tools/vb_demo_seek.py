@@ -27,7 +27,6 @@ from yolox.utils.visualize import plot_tracking_mc
 from tracker.vball_sort import VbSORT
 from tracker.tracking_utils.timer import Timer
 
-from vtrak.config import cfg
 from vtrak.vball_misc import run_ffprobe, read_play_frames, VidRdSeek
 from vtrak.track_utils import TrackWriter
 from vtrak.yolox_utils import Predictor
